@@ -237,7 +237,7 @@ const check = (name, cond, detail) => {
   check("SAFE-8b secrets-set 写前留 .bak", /copyFileSync\(secretsFile\(\), secretsFile\(\) \+ "\.bak"\)/.test(cjs), "");
   check("SAFE-8c POST 超 2MB 拒绝（413）", /413/.test(cjs), "");
   check("SAFE-8d secrets-get 损坏库返回 error 态而非空库", /error: true/.test(cjs), "");
-  check("SAFE-8e bridge 鉴权：无 Origin 头的本机请求仍需 tk 令牌", /searchParams\.get\("tk"\) === bridgeToken/.test(cjs), "");
+  check("SAFE-8e bridge 鉴权：无 Origin 头的本机请求仍需 tk 令牌", /searchParams\.get\("tk"\)/.test(cjs) && /timingSafeEqual\(a, b\)/.test(cjs), "");
 }
 
 // —— 第二轮审阅修复锁定：Gitee 登录 / 通知角标代际 / GitLab 搜索排序 ——
