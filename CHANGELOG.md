@@ -2,6 +2,12 @@
 
 本项目的重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.5] - 2026-09-29
+
+### Fixed
+
+- **修复 Linux `.deb` 构建失败**：`package.json` 的 `author` 补上 email（deb 包需要 maintainer email），否则 electron-builder 报 `Please specify author 'email'`。
+
 ## [1.0.4] - 2026-09-29
 
 ### Changed
