@@ -1,16 +1,19 @@
 {
-  "name": "git-console-pro",
+  "name": "multi-git-desktop",
   "productName": "Git 控制台",
-  "version": "1.0.3",
+  "description": "本地多平台 Git 管理桌面应用：一个窗口管理 GitHub / GitLab / Gitee / GitCode 的仓库、文件、Issue、PR、Release",
+  "author": "ZIO123-DOT",
+  "version": "1.0.4",
   "private": true,
   "main": "desktop.cjs",
   "scripts": {
-    "build": "node build-desktop.mjs",
-    "build:mac": "node build-desktop.mjs --platform=darwin --arch=arm64",
-    "build:mac:x64": "node build-desktop.mjs --platform=darwin --arch=x64",
-    "build:win": "node build-desktop.mjs --platform=win32 --arch=x64"
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux"
   },
   "devDependencies": {
-    "@electron/packager": "^20.3.0"
+    "electron": "44.3.0",
+    "electron-builder": "^26.0.12"
   }
 }

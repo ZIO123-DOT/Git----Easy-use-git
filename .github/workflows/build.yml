@@ -1,0 +1,75 @@
+name: build
+
+# 三平台安装包构建 + 发布到 GitHub Release。
+# 说明：安装包均未签名（无证书）——
+#   Windows 首次运行有 SmartScreen 提示；macOS 需右键 → 打开绕过 Gatekeeper；
+#   Linux 无签名校验。个人项目可接受，如需正式分发请配置代码签名。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            script: build:win
+          - os: macos-latest
+            script: build:mac
+          - os: ubuntu-latest
+            script: build:linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        working-directory: electron-app
+        run: npm install
+
+      - name: Build installers
+        working-directory: electron-app
+        run: npm run ${{ matrix.script }}
+        env:
+          # 不自动寻找签名身份，产出未签名/自动 ad-hoc 签名的包
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            electron-app/release/*.exe
+            electron-app/release/*.dmg
+            electron-app/release/*.zip
+            electron-app/release/*.AppImage
+            electron-app/release/*.deb
+
+  release:
+    name: publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**
+          generate_release_notes: true

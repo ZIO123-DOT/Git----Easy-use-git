@@ -2,6 +2,14 @@
 
 本项目的重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.4] - 2026-09-29
+
+### Changed
+
+- **打包改为 electron-builder，产出真正安装包**：Windows（NSIS 安装器 + 便携 exe）、macOS（dmg + zip）、Linux（AppImage + deb），替换原先只能出免安装文件夹的 `@electron/packager`。
+- **安装版数据目录改用系统标准位置**：安装版用户数据写入 `%APPDATA%\Git 控制台` / `~/Library/Application Support/Git 控制台` / `~/.config/Git 控制台`，便携版仍放 exe 旁 `.app-data`；`main.log` 同步写入 userData。
+- **三平台 GitHub Actions 自动构建发布**：`.github/workflows/build.yml` 用 windows/macos/ubuntu 矩阵构建，`v*` 标签推送后自动发 Release（替换原仅 macOS 的 workflow）。
+
 ## [1.0.3] - 2026-09-28
 
 ### Security

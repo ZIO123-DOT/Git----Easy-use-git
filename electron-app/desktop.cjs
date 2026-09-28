@@ -39,7 +39,7 @@ const isAllowedDownloadUrl = (raw) => {
   return DOWNLOAD_ALLOW.some((d) => target.hostname === d || target.hostname.endsWith("." + d));
 };
 
-// portableRoot 在 setPath 前还没定义，这里直接用 __dirname 的父级或应用目录
+// 日志写到 userData（安装版=系统标准目录；便携版=exe 旁的 .app-data）
 // 日志改为内存缓冲 + 500ms/64KB 批量刷盘（原为每次同步写盘）
 let logBuffer = "";
 let logTimer = null;
@@ -49,7 +49,7 @@ const flushLog = () => {
   const chunk = logBuffer;
   logBuffer = "";
   try {
-    const dir = app.isPackaged ? path.dirname(process.execPath) : __dirname;
+    const dir = app.getPath("userData");
     fs.mkdirSync(dir, { recursive: true });
     const logPath = path.join(dir, "main.log");
     try {
@@ -68,11 +68,13 @@ process.on("uncaughtException", (e) => {
   log("uncaughtException: " + (e.stack || e.message));
 });
 
-// 便携模式：用户数据放在 exe 旁边（打包后）/ 应用目录（开发时）
-const portableRoot = app.isPackaged
-  ? path.dirname(process.execPath)
-  : __dirname;
-app.setPath("userData", path.join(portableRoot, ".app-data"));
+// 便携模式：仅 electron-builder 的 portable 目标会在运行时设置 PORTABLE_EXECUTABLE_DIR，
+// 此时用户数据放 exe 旁边；安装版（NSIS/dmg/deb）用系统标准 userData
+//（%APPDATA% / ~/Library/Application Support / ~/.config），避免写入只读安装目录。
+const PORTABLE_ROOT = process.env.PORTABLE_EXECUTABLE_DIR;
+if (PORTABLE_ROOT) {
+  app.setPath("userData", path.join(PORTABLE_ROOT, ".app-data"));
+}
 
 // 关闭行为策略：ask（每次询问）/ minimize（后台）/ exit（直接退出）
 let closePolicy = "ask";

@@ -1,0 +1,67 @@
+appId: com.zio123.multi-git-desktop
+productName: Git 控制台
+copyright: Copyright (c) 2026 — Apache-2.0
+
+directories:
+  output: release
+  # 构建期资源（安装包图标），不要打进应用 asar；运行时资源仍在 build/ 下
+  buildResources: build-resources
+
+# 只打包运行时必需文件（应用无运行时 npm 依赖，纯 Electron + node 内置）
+files:
+  - desktop.cjs
+  - console.html
+  - console.js
+  - package.json
+  - build/tray.png
+  - build/icon.ico
+
+# Windows：NSIS 向导式安装器 + 便携版单文件 exe
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Git 控制台
+  artifactName: multi-git-desktop-${version}-windows-setup.${ext}
+
+portable:
+  artifactName: multi-git-desktop-${version}-windows-portable.${ext}
+
+# macOS：dmg（拖入 Applications）+ zip
+mac:
+  icon: build-resources/icon.png
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+
+dmg:
+  artifactName: multi-git-desktop-${version}-macos-${arch}.${ext}
+
+# Linux：AppImage（双击即用）+ deb（Debian/Ubuntu 安装）
+linux:
+  icon: build-resources/icon.png
+  category: Development
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+
+appImage:
+  artifactName: multi-git-desktop-${version}-linux-${arch}.${ext}
+
+deb:
+  artifactName: multi-git-desktop-${version}-linux-${arch}.${ext}
