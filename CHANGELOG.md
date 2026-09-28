@@ -2,6 +2,19 @@
 
 本项目的重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.3] - 2026-09-28
+
+### Security
+
+- **Gitee 认证改走请求头**：Gitee 的 `access_token` 由 URL query 改为 `Authorization: token <token>` 头（与 GitHub/GitLab/GitCode 口径一致），token 不再流经代理与访问日志；登录探测同步对齐。
+- **安全存储不可用时拒绝明文落盘**：`safeStorage` 不可用（加密后端缺失）时 `secrets-set` 直接返回 503、绝不写 `{ plain:true }` 的明文文件，与「Windows 凭据加密存储」宣传一致；浏览器/Edge 文件协议模式保留 localStorage 但首次落盘时弹一次性明文告警。
+
+### Fixed
+
+- **局部 innerHTML 转义收口**：网络诊断、代理端口探测、代理测试三处 `innerHTML` 对主进程回传的动态值补 `esc()`（其中两处改为 `textContent`），消除潜在注入 sink。
+- **下载大小上限**：`will-download` 增加 1 GiB 上限（Content-Length 已知时前置拦截，未知时按已收字节实时取消），防止写满磁盘。
+- **saveAccounts 异步化 + 重试**：令牌保存改为 `async` 并带一次重试，写失败明确 toast 而非 fire-and-forget 静默丢失。
+
 ## [1.0.2] - 2026-09-28
 
 ### Security
