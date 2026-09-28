@@ -43,6 +43,7 @@ jobs:
         env:
           # 不自动寻找签名身份，产出未签名/自动 ad-hoc 签名的包
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          DEBUG: electron-builder
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

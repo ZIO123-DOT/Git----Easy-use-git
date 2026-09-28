@@ -2,6 +2,13 @@
 
 本项目的重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.7] - 2026-09-29
+
+### Fixed
+
+- **AppImage 改用静态运行时工具链（`toolsets.appimage: "1.0.3"`）**：在 Ubuntu 22.04+/24.04 上无需 libfuse2，产出可直接运行的 AppImage。
+- **精简 package.json 元数据**：仅保留 deb 必需的 `author.email` 与 `homepage`，移除会干扰构建的 `repository`/`license` 字段。
+
 ## [1.0.6] - 2026-09-29
 
 ### Fixed

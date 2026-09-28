@@ -7,6 +7,10 @@ directories:
   # 构建期资源（安装包图标），不要打进应用 asar；运行时资源仍在 build/ 下
   buildResources: build-resources
 
+# AppImage 用静态运行时工具链（1.0.3），在 Ubuntu 22.04+/24.04 上无需 libfuse2，产出可直接运行的包
+toolsets:
+  appimage: "1.0.3"
+
 # 只打包运行时必需文件（应用无运行时 npm 依赖，纯 Electron + node 内置）
 files:
   - desktop.cjs

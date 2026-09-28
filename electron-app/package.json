@@ -7,12 +7,7 @@
     "email": "zio123@users.noreply.github.com"
   },
   "homepage": "https://github.com/ZIO123-DOT/multi-git-desktop",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/ZIO123-DOT/multi-git-desktop.git"
-  },
-  "license": "Apache-2.0",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "private": true,
   "main": "desktop.cjs",
   "scripts": {
