@@ -29,6 +29,9 @@ const bridgeToken = crypto.randomBytes(16).toString("hex");
 // 3xx 重定向——初始 URL 白名单不足以约束终链。此校验供「发起前」与「will-download 拿到
 // 重定向链后」两处复用，任一环节越界即拒绝。
 const DOWNLOAD_ALLOW = ["github.com", "githubusercontent.com", "gitlab.com", "gitee.com", "gitcode.com"];
+// P3：单文件下载大小上限（1 GiB），防止写满磁盘。Content-Length 已知时在 will-download 先行拦截，
+// 未知（chunked）时在下载过程中按已收字节兜底取消。
+const DOWNLOAD_MAX_BYTES = 1024 * 1024 * 1024;
 const isAllowedDownloadUrl = (raw) => {
   let target = null;
   try { target = new URL(raw); } catch { return false; }
@@ -260,7 +263,11 @@ if (!app.requestSingleInstanceLock()) {
             const enc = safeStorage.encryptString(JSON.stringify(accounts));
             fs.writeFileSync(secretsFile(), JSON.stringify({ v: 1, enc: true, data: enc.toString("base64") }));
           } else {
-            fs.writeFileSync(secretsFile(), JSON.stringify({ v: 1, plain: true, data: accounts }));
+            // P1-2：安全存储不可用时拒绝明文落盘（与「Windows 凭据加密存储」宣传一致），
+            // 绝不写 { plain:true } 的明文文件；渲染层据此 toast 提示用户重启后需重新登录。
+            log("secrets-set: safeStorage unavailable, refusing plaintext persist");
+            jsonReply(res, 503, { ok: false, error: "系统安全存储不可用，已拒绝明文保存令牌" });
+            return;
           }
           jsonReply(res, 200, { ok: true });
         } catch (e) {
@@ -615,6 +622,15 @@ if (!app.requestSingleInstanceLock()) {
         item.cancel();
         return;
       }
+      const total = item.getTotalBytes();
+      if (total > DOWNLOAD_MAX_BYTES) {
+        log("download: cancelled (too large, total=" + total + "): " + (item.getURL() || ""));
+        const pd = pendingDownload;
+        pendingDownload = null;
+        if (pd && typeof pd.resolve === "function") pd.resolve({ state: "cancelled" });
+        item.cancel();
+        return;
+      }
       const pd = pendingDownload;
       pendingDownload = null; // 单次消费
       let savePath;
@@ -633,6 +649,14 @@ if (!app.requestSingleInstanceLock()) {
         }
       }
       item.setSavePath(savePath);
+      // 未知长度下载（Content-Length 缺失/chunked）的兜底：按已收字节实时取消
+      item.on("updated", (_e, _state) => {
+        if (item.getReceivedBytes() > DOWNLOAD_MAX_BYTES) {
+          log("download: cancelled (exceeded size limit): " + (item.getURL() || ""));
+          if (pd && typeof pd.resolve === "function") pd.resolve({ state: "cancelled" });
+          item.cancel();
+        }
+      });
       item.once("done", (_e, state) => {
         log("download " + state + ": " + savePath);
         if (pd && typeof pd.resolve === "function") pd.resolve({ state, savePath });

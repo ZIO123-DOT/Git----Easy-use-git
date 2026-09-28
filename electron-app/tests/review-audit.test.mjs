@@ -220,10 +220,12 @@ const check = (name, cond, detail) => {
     /acctFp = acct\.platform \+ '#' \+ \(acct\.token \|\| ''\)\.slice\(-8\)/.test(srcApi), "");
   check("SAFE-5b cacheKey 拼入 acctFp", /cacheKey = cacheable \? \(acctFp \+ ':' \+ url\)/.test(srcApi), "");
 }
-// SAFE-6 Gitee access_token 走 URL query（已认知风险，确认现状以便跟踪）
+// SAFE-6 Gitee 认证改走 Authorization 头（不再把 token 拼进 URL query）
 {
-  check("SAFE-6 Gitee token 经 access_token= 拼 query（已知 P2 风险，记录现状）",
-    /access_token=' \+ encodeURIComponent\(acct\.token\)/.test(srcApi), "");
+  check("SAFE-6a api() 不再把 access_token 拼入 Gitee URL query",
+    !/access_token=' \+ encodeURIComponent\(acct\.token\)/.test(srcApi), "");
+  check("SAFE-6b Gitee auth 返回 Authorization: token 头",
+    /Authorization': 'token ' \+ t/.test(html), "");
 }
 // SAFE-7 confirmModal 列表项经 esc 转义（防仓库名 XSS）
 {
@@ -238,11 +240,16 @@ const check = (name, cond, detail) => {
   check("SAFE-8c POST 超 2MB 拒绝（413）", /413/.test(cjs), "");
   check("SAFE-8d secrets-get 损坏库返回 error 态而非空库", /error: true/.test(cjs), "");
   check("SAFE-8e bridge 鉴权：无 Origin 头的本机请求仍需 tk 令牌", /searchParams\.get\("tk"\)/.test(cjs) && /timingSafeEqual\(a, b\)/.test(cjs), "");
+  check("SAFE-8f secrets-set 安全存储不可用时拒绝明文落盘（不再写 plain:true）",
+    !/plain: true/.test(cjs) && /refusing plaintext persist/.test(cjs), "");
+  check("SAFE-8g 下载大小上限（DOWNLOADS_MAX_BYTES + getTotalBytes 拦截）",
+    /DOWNLOAD_MAX_BYTES/.test(cjs) && /getTotalBytes\(\)/.test(cjs), "");
 }
 
 // —— 第二轮审阅修复锁定：Gitee 登录 / 通知角标代际 / GitLab 搜索排序 ——
 {
-  check("R2-1 修复：tryLogin 对 gitee 追加 access_token query", /platform === 'gitee'\) loginUrl \+= \?access_token=/.test(html) || /platform === 'gitee'/.test(html) && /access_token=' \+ encodeURIComponent\(token\)/.test(html), "");
+  check("R2-1 修复：tryLogin 不再对 gitee 追加 access_token query（走 Authorization 头）",
+    !/access_token=' \+ encodeURIComponent\(token\)/.test(html) && /loginUrl = P\.apiBase \+ '\/user'/.test(html), "");
   check("R2-2 修复：enterShell 中 loadRepos 先于 refreshNotifCount（代际不自相残杀）",
     /loadRepos\(\); \/\/ 先启动 loadRepos[\s\S]{0,80}refreshNotifCount\(\);/.test(html), "");
   check("R2-3 修复：GitLab 搜索排序用 star_count（合法值）",

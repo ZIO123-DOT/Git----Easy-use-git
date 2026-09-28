@@ -37,7 +37,9 @@ const PLATFORMS = {
   gitee: {
     label: 'Gitee',
     apiBase: 'https://gitee.com/api/v5',
-    auth: () => ({}),
+    // Gitee 官方 API v5 支持经请求头认证（Authorization: token <access_token>），
+    // 与 GitHub/GitLab/GitCode 保持一致，避免 token 流经 URL query（代理与访问日志可记录）。
+    auth: t => ({ 'Authorization': 'token ' + t }),
     tokenUrl: 'https://gitee.com/profile/personal_access_tokens',
     tokenHint: 'Gitee 私人令牌（勾选 projects, issues, pull_requests, user_info）',
     caps: { notifications: false, gists: false, actions: false, releases: true, editFile: true, search: true, treeVerify: true, contentsVerify: true },
@@ -113,7 +115,8 @@ async function loadAccounts() {
   const idx = parseInt(localStorage.getItem('gc_active') || '0', 10);
   state.activeIdx = state.accounts[idx] ? idx : (state.accounts.length ? 0 : -1);
 }
-function saveAccounts() {
+let filePlainWarned = false; // file: 明文模式仅提示一次，避免每次保存都弹
+async function saveAccounts() {
   // 只读降级：令牌库不可读时禁止落盘——空库写回会覆盖全部 Token（数据丢失链的最后一道闸）
   if (state.vaultReadOnly) {
     console.warn('saveAccounts: vault read-only, skip persist');
@@ -124,17 +127,27 @@ function saveAccounts() {
     // Edge / app 模式（file: 协议）没有 safeStorage 加密后端，只能落 localStorage 明文。
     // 此处为非加密存储，属该模式下的已知限制（Electron 桌面模式走下面的加密库分支）。
     localStorage.setItem('gc_accounts', JSON.stringify(state.accounts));
+    if (!filePlainWarned) {
+      filePlainWarned = true;
+      toast('当前为浏览器/Edge 模式，Token 以未加密方式保存在本机；如需加密存储请使用桌面版', 'err');
+    }
     return;
   }
-  // 加密库保存失败：绝不回退写 localStorage 明文（否则与「Windows 凭据加密存储」的宣传冲突）——
+  // 加密库保存（带一次重试）：失败绝不回退写 localStorage 明文（否则与「Windows 凭据加密存储」的宣传冲突）——
   // 只提示用户，宁可让其重启后重新登录，也不落明文。
-  fetch(bridgeURL('secrets-set'), {
+  const persist = () => fetch(bridgeURL('secrets-set'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ accounts: state.accounts }),
-  }).then(r => r.json()).then(d => {
-    if (!d || d.ok === false) toast('Token 保存失败，请注意重启后可能需重新登录', 'err');
-  }).catch(() => { toast('Token 保存失败，请注意重启后可能需重新登录', 'err'); });
+  }).then(r => r.json());
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const d = await persist();
+      if (!d || d.ok === false) throw new Error('persist rejected');
+      return;
+    } catch (e) { /* 失败重试一次 */ }
+  }
+  toast('Token 保存失败，请注意重启后可能需重新登录', 'err');
 }
 function activeAccount() {
   return state.accounts[state.activeIdx] || null;
@@ -522,9 +535,6 @@ async function api(method, path, body, opts) {
     }
   }
   let url = P.apiBase + path;
-  if (acct.platform === 'gitee') {
-    url += (url.includes('?') ? '&' : '?') + 'access_token=' + encodeURIComponent(acct.token);
-  }
   // Gitee / GitCode 的 contents 写接口与 GitLab 同构（两者官方文档均确认）：
   //   新建文件 = POST /repos/{o}/{r}/contents/{path}；更新文件 = PUT 且必须带 sha。
   // 本项目调用方沿用 GitHub 的「PUT 兼做创建+更新」语义，故此处对「无 sha 的写文件请求」同构改写为 POST。
@@ -826,7 +836,7 @@ function loginPing(){
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ host }),
   }).then(r => r.json()).then(d => {
-    el.innerHTML = d.ok
+    el.textContent = d.ok
       ? '✓ ' + P.label + ' 连接正常（' + d.ms + 'ms），可以直接登录'
       : '✗ ' + P.label + ' 无法访问 —— 请开启代理客户端，或点「网络设置 / 自动探测代理」配置';
   }).catch(() => { el.innerHTML = ''; });
@@ -871,7 +881,7 @@ function openLoginNetModal(){
     el.textContent = '正在探测本机代理端口 ...';
     fetch(bridgeURL('probe-ports')).then(r => r.json()).then(d => {
       el.innerHTML = d.ports.length
-        ? '发现本机代理端口：' + d.ports.map(p => '<button class="chip" data-port="' + p + '" style="margin:2px">' + p + '</button>').join(' ') + '（点击选用）'
+        ? '发现本机代理端口：' + d.ports.map(p => '<button class="chip" data-port="' + esc(p) + '" style="margin:2px">' + esc(p) + '</button>').join(' ') + '（点击选用）'
         : '未发现常见代理端口 —— 请确认代理客户端已开启，或手动填写端口';
       $$('#ln-probe-result [data-port]').forEach(b => b.addEventListener('click', () => {
         cur = '127.0.0.1:' + b.dataset.port;
@@ -892,7 +902,7 @@ function openLoginNetModal(){
       return fetch(bridgeURL('ping')).then(r => r.json()).then(dd => {
         st.innerHTML = dd.ok
           ? '✓ GitHub 连接正常（' + dd.ms + 'ms）—— 现在可以登录了'
-          : '✗ 仍然连不上：' + (dd.error || 'HTTP ' + dd.status) + ' —— 换个端口或确认代理客户端在运行';
+          : '✗ 仍然连不上：' + esc(dd.error || 'HTTP ' + dd.status) + ' —— 换个端口或确认代理客户端在运行';
         if (dd.ok) loginPing();
       });
     }).catch(() => { st.textContent = '测试失败'; });
@@ -906,9 +916,8 @@ async function tryLogin(platform, token){
   btn.disabled = true; btn.textContent = '正在验证 ...';
   $('#login-err').innerHTML = '';
   try {
-    // Gitee 认证走 access_token query（api() 已追加，此处登录探测必须对齐——否则匿名请求必 401）
-    let loginUrl = P.apiBase + '/user';
-    if (platform === 'gitee') loginUrl += '?access_token=' + encodeURIComponent(token);
+    // Gitee 认证走 Authorization: token 头（api() 已对齐），不再拼 access_token query
+    const loginUrl = P.apiBase + '/user';
     const resp = await fetch(loginUrl, { headers: Object.assign({ 'Accept': 'application/json' }, P.auth(token)), signal: AbortSignal.timeout(30000) });
     updateRate(resp);
     if (!resp.ok) throw new Error(resp.status === 401 ? 'Token 无效或已过期，请检查后重试' : P.label + ' 返回 ' + resp.status);

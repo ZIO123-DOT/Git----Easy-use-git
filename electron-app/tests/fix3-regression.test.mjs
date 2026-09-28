@@ -83,18 +83,21 @@ const check = (name, cond, detail) => {
   }
 
   const giteeNew = await driveApi("gitee", "POST", "/repos/o/r/git/refs", { ref: "refs/heads/dev", sha: "abc123" });
-  check("FIX3-2a Gitee 建分支 URL 改写为 /branches",
-    giteeNew.url === "https://gitee.com/api/v5/repos/o/r/branches?access_token=TOKEN12345678", giteeNew && giteeNew.url);
+  check("FIX3-2a Gitee 建分支 URL 改写为 /branches（不含 access_token query）",
+    giteeNew.url === "https://gitee.com/api/v5/repos/o/r/branches", giteeNew && giteeNew.url);
   check("FIX3-2b Gitee 建分支 body 映射为 {branch_name, refs}",
     giteeNew.opt.body === JSON.stringify({ branch_name: "dev", refs: "abc123" }), giteeNew && giteeNew.opt.body);
+  check("FIX3-2g Gitee 认证走 Authorization 头而非 URL query",
+    giteeNew.opt.headers && giteeNew.opt.headers.Authorization === "token TOKEN12345678",
+    JSON.stringify(giteeNew && giteeNew.opt && giteeNew.opt.headers));
 
   const gitcodeNew = await driveApi("gitcode", "POST", "/repos/o/r/git/refs", { ref: "refs/heads/feat-x", sha: "abc123" });
   check("FIX3-2c GitCode 建分支同样改写 /branches",
     gitcodeNew.url === "https://api.gitcode.com/api/v5/repos/o/r/branches", gitcodeNew && gitcodeNew.url);
 
   const giteeDel = await driveApi("gitee", "DELETE", "/repos/o/r/git/refs/heads/feat%2Fx", undefined);
-  check("FIX3-2d Gitee 删分支 URL 改写为 /branches/{branch}",
-    giteeDel.url === "https://gitee.com/api/v5/repos/o/r/branches/feat%2Fx?access_token=TOKEN12345678", giteeDel && giteeDel.url);
+  check("FIX3-2d Gitee 删分支 URL 改写为 /branches/{branch}（不含 access_token query）",
+    giteeDel.url === "https://gitee.com/api/v5/repos/o/r/branches/feat%2Fx", giteeDel && giteeDel.url);
 
   // 对照：GitHub 建分支仍走 /git/refs（未被误伤）
   const ghNew = await driveApi("github", "POST", "/repos/o/r/git/refs", { ref: "refs/heads/dev", sha: "abc123" });
