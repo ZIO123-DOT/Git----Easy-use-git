@@ -1,0 +1,788 @@
+<script>
+'use strict';
+/* ================================================================
+   Git 控制台 —— 多平台 Git 管理台（GitHub / GitLab / Gitee / GitCode）
+   平台适配与账号管理见 part_adapters
+   ================================================================ */
+
+const state = {
+  user: null, theme: 'light', loginPlatform: 'github', tokenScopes: null,
+  accounts: [], activeIdx: -1, reqGen: 0, starredSet: new Set(),
+  repos: [], reposLoaded: false,
+  selected: new Set(), filter: 'all', query: '',
+  stars: [], starsLoaded: false,
+  notifications: [], notifLoaded: false, notifAll: false, notifCount: 0,
+  gists: [], gistsLoaded: false,
+  searchResults: null, searchQuery: '', searching: false,
+  repo: null, branches: [], branch: null,
+  tab: 'files', path: '', file: null,
+  commits: [], issues: [], issueFilter: 'open',
+  pulls: [], releases: [], runs: [],
+};
+
+/* ---------------- 工具 ---------------- */
+const $  = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function fmtSize(kb){ if (kb == null) return '-'; return kb >= 1024 ? (kb/1024).toFixed(1) + ' MB' : kb + ' KB'; }
+function timeAgo(iso){
+  if (!iso) return '';
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.floor(s/60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s/3600) + ' 小时前';
+  if (s < 2592000) return Math.floor(s/86400) + ' 天前';
+  return iso.slice(0, 10);
+}
+const LANG_COLORS = {
+  JavaScript:'#f1e05a', TypeScript:'#3178c6', Python:'#3572A5', Java:'#b07219',
+  Go:'#00ADD8', Rust:'#dea584', C:'#555555', 'C++':'#f34b7d', 'C#':'#178600',
+  HTML:'#e34c26', CSS:'#563d7c', Vue:'#41b883', Shell:'#89e051', Markdown:'#083fa1',
+  'Jupyter Notebook':'#DA5B0B', Kotlin:'#A97BFF', PHP:'#4F5D95', Ruby:'#701516', Swift:'#F05138',
+  Dart:'#00B4AB', Lua:'#000080', 'Objective-C':'#438eff', Scala:'#c22d40', Zig:'#ec915c',
+};
+const langColor = l => LANG_COLORS[l] || '#9aa4b8';
+const IMG_EXT = ['png','jpg','jpeg','gif','webp','svg','bmp','ico','avif'];
+
+function encPath(p){
+  const segs = p.split('/');
+  if (segs.some(seg => seg === '..' || seg === '.')) throw new Error('路径不能包含 . 或 ..');
+  return segs.map(encodeURIComponent).join('/');
+}
+function utf8ToB64(str){
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk)
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return btoa(bin);
+}
+function b64ToUtf8(b64){
+  const bin = atob(b64.replace(/\s/g, ''));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+/* ---------------- 图标 ---------------- */
+function icon(name, size){
+  size = size || 16;
+  const S = 'stroke="currentColor" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"';
+  const p = {
+    home:'<path d="M4 11l8-7 8 7v8a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19v-8z" ' + S + '/>',
+    repo:'<path d="M5 3.5h12.5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H7A2.5 2.5 0 0 1 4.5 16V5a1.5 1.5 0 0 1 .5-1.5zM7 16h11.5" ' + S + '/>',
+    star:'<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9L3.5 9.7l5.9-.8L12 3.5z" ' + S + '/>',
+    starFill:'<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9L3.5 9.7l5.9-.8L12 3.5z" fill="currentColor"/>',
+    bell:'<path d="M12 4a5 5 0 0 0-5 5v3.4l-1.5 2.8a.8.8 0 0 0 .7 1.2h11.6a.8.8 0 0 0 .7-1.2L17 12.4V9a5 5 0 0 0-5-5zM10 18.7a2 2 0 0 0 4 0" ' + S + '/>',
+    search:'<circle cx="10.5" cy="10.5" r="6" ' + S + '/><path d="M15 15l5.2 5.2" ' + S + '/>',
+    code:'<path d="M8.5 7L4 12l4.5 5M15.5 7L20 12l-4.5 5" ' + S + '/>',
+    gear:'<circle cx="12" cy="12" r="3.2" ' + S + '/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.35a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.65 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" ' + S + '/>',
+    logout:'<path d="M9 4H5.5A1.5 1.5 0 0 0 4 5.5v13A1.5 1.5 0 0 0 5.5 20H9M14 8l4 4-4 4M18 12H9" ' + S + '/>',
+    folder:'<path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6z" fill="currentColor" opacity=".8"/>',
+    file:'<path d="M6 2h6l4 4v12a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 4 18V3.5A1.5 1.5 0 0 1 5.5 2H6z" ' + S + '/><path d="M12 2v4h4" ' + S + '/>',
+    branch:'<circle cx="6" cy="5" r="2.1" fill="currentColor"/><circle cx="6" cy="19" r="2.1" fill="currentColor"/><circle cx="18" cy="7" r="2.1" fill="currentColor"/><path d="M6 7.2v9.6M18 9.2c0 4-4 4.5-9 5" ' + S + '/>',
+    issue:'<circle cx="12" cy="12" r="8.5" ' + S + '/><circle cx="12" cy="12" r="3" fill="currentColor"/>',
+    pr:'<circle cx="6.5" cy="6" r="2.1" fill="currentColor"/><circle cx="6.5" cy="18" r="2.1" fill="currentColor"/><circle cx="17.5" cy="18" r="2.1" fill="currentColor"/><path d="M6.5 8.2v7.6M15.5 16.5v-6a4 4 0 0 0-4-4H9.5M12 4l-2.5 2.5L12 9" ' + S + '/>',
+    commit:'<circle cx="12" cy="12" r="3.4" ' + S + '/><path d="M2 12h6.4M15.6 12H22" ' + S + '/>',
+    fork:'<circle cx="7" cy="5.5" r="2" fill="currentColor"/><circle cx="17" cy="5.5" r="2" fill="currentColor"/><circle cx="12" cy="18.5" r="2" fill="currentColor"/><path d="M7 7.6v1.4a3 3 0 0 0 3 3h4a3 3 0 0 0 3-3V7.6M12 12v4.4" ' + S + '/>',
+    trash:'<path d="M5 7h14M10 7V5h4v2M8.5 7l.7 12h5.6l.7-12M10.5 10.5l.2 5M13.5 10.5l-.2 5" ' + S + '/>',
+    plus:'<path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    refresh:'<path d="M19 12a7 7 0 1 1-2-4.9M19 3.5V8h-4.5" ' + S + '/>',
+    back:'<path d="M14.5 5.5L8 12l6.5 6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    ext:'<path d="M9 5h10v10M19 5L8 16" ' + S + '/>',
+    eye:'<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" ' + S + '/><circle cx="12" cy="12" r="2.8" fill="currentColor"/>',
+    edit:'<path d="M4 20l4.3-1L20 7.3 16.7 4 5.3 15.7 4 20z" ' + S + '/>',
+    comment:'<path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9.5L4 20V6z" ' + S + '/>',
+    tag:'<path d="M4 4.8A.8.8 0 0 1 4.8 4h6.4a1 1 0 0 1 .7.3l8 8a1 1 0 0 1 0 1.4l-6.2 6.2a1 1 0 0 1-1.4 0l-8-8a1 1 0 0 1-.3-.7V4.8z" ' + S + '/><circle cx="8.3" cy="8.3" r="1.5" fill="currentColor"/>',
+    zap:'<path d="M13 2L5 13.2h5.2L9 22l8-11.2h-5.2L13 2z" ' + S + '/>',
+    archive:'<rect x="4" y="4" width="16" height="5" rx="1" ' + S + '/><path d="M6 9v9a1.5 1.5 0 0 0 1.5 1.5h9A1.5 1.5 0 0 0 18 18V9M10 13h4" ' + S + '/>',
+    download:'<path d="M12 4v11M7 10.5l5 5 5-5M5 20h14" ' + S + '/>',
+    check:'<path d="M5 12.5l4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+    x:'<path d="M6.5 6.5l11 11M17.5 6.5l-11 11" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/>',
+    moon:'<path d="M20.5 13.5A8.5 8.5 0 0 1 10.5 3.5a8.5 8.5 0 1 0 10 10z" ' + S + '/>',
+    sun:'<circle cx="12" cy="12" r="4" ' + S + '/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8" ' + S + '/>',
+  }[name] || '';
+  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" style="flex:none">' + p + '</svg>';
+}
+
+/* ---------------- Toast / Modal ---------------- */
+function toast(msg, type){
+  const t = document.createElement('div');
+  t.className = 'toast ' + (type || 'ok');
+  t.innerHTML = icon(type === 'err' ? 'x' : 'check', 15) + '<span>' + esc(msg) + '</span>';
+  $('#toasts').appendChild(t);
+  setTimeout(() => { t.classList.add('fade'); setTimeout(() => t.remove(), 450); }, 3400);
+}
+function openModal(html){ $('#modal').innerHTML = html; $('#modal-mask').classList.remove('hidden'); }
+function closeModal(){ $('#modal-mask').classList.add('hidden'); $('#modal').innerHTML = ''; }
+$('#modal-mask').addEventListener('mousedown', e => { if (e.target.id === 'modal-mask') closeModal(); });
+
+/* 通用确认：需要输入指定文字 */
+function confirmModal(opts){
+  const need = opts.required;
+  openModal(`
+    <div class="m-title danger">${esc(opts.title)}</div>
+    <p class="m-text">${opts.body}</p>
+    ${opts.list ? '<div class="m-list">' + opts.list.map(n => '<div>' + esc(n) + '</div>').join('') + '</div>' : ''}
+    <p class="m-text">请完整输入 <b style="font-family:var(--mono)">${esc(need)}</b> 以确认：</p>
+    <input class="m-input" id="cm-input" autocomplete="off">
+    <div class="m-actions">
+      <button class="btn" id="cm-cancel">取消</button>
+      <button class="btn danger" id="cm-ok" disabled>${esc(opts.okText || '确认')}</button>
+    </div>
+  `);
+  const input = $('#cm-input'), ok = $('#cm-ok');
+  input.focus();
+  input.addEventListener('input', () => { ok.disabled = input.value.trim() !== need; });
+  $('#cm-cancel').addEventListener('click', closeModal);
+  ok.addEventListener('click', async () => {
+    ok.disabled = true;
+    try { await opts.onConfirm(); closeModal(); }
+    catch (e) { toast('操作失败：' + e.message, 'err'); ok.disabled = false; }
+  });
+}
+
+/* ---------------- 主题 ---------------- */
+function applyTheme(){
+  document.body.classList.toggle('dark', state.theme === 'dark');
+  const btn = $('#tb-theme');
+  if (btn) {
+    btn.innerHTML = icon(state.theme === 'dark' ? 'sun' : 'moon');
+    btn.title = state.theme === 'dark' ? '切换到浅色模式' : '切换到深色模式';
+  }
+}
+function toggleTheme(){
+  state.theme = state.theme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('ghc_theme', state.theme);
+  applyTheme();
+  try { fetch(bridgeURL('theme', '&dark=' + (state.theme === 'dark' ? '1' : '0'))).catch(() => {}); } catch (e) {}
+}
+$('#tb-theme').addEventListener('click', toggleTheme);
+$('#tb-home').addEventListener('click', () => showView('overview'));
+$('#tb-platform').addEventListener('click', (e) => {
+  e.stopPropagation();
+  renderPlatformMenu();
+  const menu = $('#tb-menu');
+  const r = e.currentTarget.getBoundingClientRect();
+  menu.style.top = Math.round(r.bottom + 6) + 'px';
+  menu.style.left = Math.max(8, Math.round(r.left - 8)) + 'px';
+  menu.classList.toggle('open');
+});
+document.addEventListener('click', (e) => {
+  const menu = $('#tb-menu');
+  if (menu.classList.contains('open') && !menu.contains(e.target) && e.target.id !== 'tb-platform' && !e.target.closest('#tb-platform')) closeTbMenu();
+});
+
+/* api / updateRate / requireScopes 已移至平台适配层 */
+
+/* ---------------- 登录（多平台） ---------------- */
+let loginPlatform = 'github';
+function renderLoginPlatforms(){
+  // 同步 state.loginPlatform：loginPing 读它来选探测目标，此前它恒为 'github'，选 GitLab/Gitee/GitCode 后网络状态区仍探 GitHub
+  state.loginPlatform = loginPlatform;
+  $('#login-platforms').innerHTML = Object.keys(PLATFORMS).map(k =>
+    '<button class="plat-chip ' + (loginPlatform === k ? 'active' : '') + '" data-lp="' + k + '">' + PLATFORMS[k].label + '</button>').join('');
+  const P = PLATFORMS[loginPlatform];
+  $('#login-token-url').href = P.tokenUrl;
+  $('#login-token-hint').textContent = P.tokenHint;
+  $('#token-input').placeholder = loginPlatform === 'github' ? 'ghp_ 开头的 Classic Token' : 'Personal Access Token';
+  $$('#login-platforms .plat-chip').forEach(b => b.addEventListener('click', () => {
+    loginPlatform = b.dataset.lp;
+    renderLoginPlatforms();
+    loginPing(); // 平台切换后按新平台重新探测，避免状态区显示旧平台的结论
+  }));
+}
+/* ================= 登录页网络诊断与代理 ================= */
+function loginPing(){
+  const el = $('#net-status');
+  if (!el) return;
+  // 按当前选中平台探测对应 API 域（主进程白名单校验 host）
+  const P = PLATFORMS[state.loginPlatform || 'github'] || PLATFORMS.github;
+  let host = 'api.github.com';
+  try { host = new URL(P.apiBase).host; } catch (e) {}
+  el.textContent = '正在检测 ' + P.label + ' 连接 ...';
+  fetch(bridgeURL('ping'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host }),
+  }).then(r => r.json()).then(d => {
+    el.innerHTML = d.ok
+      ? '✓ ' + P.label + ' 连接正常（' + d.ms + 'ms），可以直接登录'
+      : '✗ ' + P.label + ' 无法访问 —— 请开启代理客户端，或点「网络设置 / 自动探测代理」配置';
+  }).catch(() => { el.innerHTML = ''; });
+}
+function openLoginNetModal(){
+  openModal(`
+    <div class="m-title">网络设置</div>
+    <p class="m-text">GitHub 连不上时配置代理。肥猫云 / Clash / V2Ray 等客户端会开一个本地端口（可点「自动探测端口」找）。</p>
+    <div class="chips" id="ln-chips">
+      <button class="chip" data-pv="system">跟随系统</button>
+      <button class="chip" data-pv="direct">直连</button>
+      <button class="chip" data-pv="custom">自定义代理</button>
+    </div>
+    <div class="form-row" style="margin-top:12px">
+      <div class="m-field" style="flex:1;min-width:220px">
+        <input class="m-input" id="ln-input" placeholder="例如 127.0.0.1:7890" style="font-family:var(--mono)">
+      </div>
+      <button class="btn" id="ln-probe">自动探测端口</button>
+    </div>
+    <div id="ln-probe-result" style="font-size:12px;color:var(--muted);margin-bottom:10px"></div>
+    <div class="m-actions">
+      <button class="btn" id="ln-cancel">取消</button>
+      <button class="btn primary" id="ln-save">保存并测试</button>
+    </div>
+    <div id="ln-status" style="font-size:12.5px;color:var(--muted);margin-top:8px"></div>
+  `);
+  let cur = 'system';
+  const syncUI = () => {
+    const custom = cur !== 'system' && cur !== 'direct';
+    $$('#ln-chips .chip').forEach(c => c.classList.toggle('active', c.dataset.pv === (custom ? 'custom' : cur)));
+    $('#ln-input').value = custom ? cur : '';
+  };
+  fetch(bridgeURL('getproxy')).then(r => r.json()).then(d => { cur = d.proxy || 'system'; syncUI(); }).catch(() => {});
+  $$('#ln-chips .chip').forEach(c => c.addEventListener('click', () => {
+    cur = c.dataset.pv;
+    syncUI();
+    if (cur === 'custom') $('#ln-input').focus();
+  }));
+  $('#ln-cancel').addEventListener('click', closeModal);
+  $('#ln-probe').addEventListener('click', () => {
+    const el = $('#ln-probe-result');
+    el.textContent = '正在探测本机代理端口 ...';
+    fetch(bridgeURL('probe-ports')).then(r => r.json()).then(d => {
+      el.innerHTML = d.ports.length
+        ? '发现本机代理端口：' + d.ports.map(p => '<button class="chip" data-port="' + p + '" style="margin:2px">' + p + '</button>').join(' ') + '（点击选用）'
+        : '未发现常见代理端口 —— 请确认代理客户端已开启，或手动填写端口';
+      $$('#ln-probe-result [data-port]').forEach(b => b.addEventListener('click', () => {
+        cur = '127.0.0.1:' + b.dataset.port;
+        $('#ln-input').value = cur;
+        syncUI();
+      }));
+    }).catch(() => { el.textContent = '探测失败'; });
+  });
+  $('#ln-save').addEventListener('click', () => {
+    const v = cur === 'custom' ? $('#ln-input').value.trim() : cur;
+    if (cur === 'custom' && !v) { $('#ln-status').textContent = '请填写代理地址'; return; }
+    const st = $('#ln-status');
+    st.textContent = '正在应用代理 ...';
+    fetch(bridgeURL('setproxy', '&value=' + encodeURIComponent(v))).then(r => r.json()).then(d => {
+      // 按主进程真实结果反馈：应用失败时不再假装进入「测试连接」
+      if (!d || !d.ok) { st.textContent = '✗ 代理应用失败：' + ((d && d.error) || '未知错误'); return; }
+      st.textContent = '已保存，正在测试 GitHub 连接 ...';
+      return fetch(bridgeURL('ping')).then(r => r.json()).then(dd => {
+        st.innerHTML = dd.ok
+          ? '✓ GitHub 连接正常（' + dd.ms + 'ms）—— 现在可以登录了'
+          : '✗ 仍然连不上：' + (dd.error || 'HTTP ' + dd.status) + ' —— 换个端口或确认代理客户端在运行';
+        if (dd.ok) loginPing();
+      });
+    }).catch(() => { st.textContent = '测试失败'; });
+  });
+}
+$('#login-net-btn').addEventListener('click', openLoginNetModal);
+
+async function tryLogin(platform, token){
+  const P = PLATFORMS[platform];
+  const btn = $('#login-btn');
+  btn.disabled = true; btn.textContent = '正在验证 ...';
+  $('#login-err').innerHTML = '';
+  try {
+    // Gitee 认证走 access_token query（api() 已追加，此处登录探测必须对齐——否则匿名请求必 401）
+    let loginUrl = P.apiBase + '/user';
+    if (platform === 'gitee') loginUrl += '?access_token=' + encodeURIComponent(token);
+    const resp = await fetch(loginUrl, { headers: Object.assign({ 'Accept': 'application/json' }, P.auth(token)), signal: AbortSignal.timeout(30000) });
+    updateRate(resp);
+    if (!resp.ok) throw new Error(resp.status === 401 ? 'Token 无效或已过期，请检查后重试' : P.label + ' 返回 ' + resp.status);
+    let u = await resp.json();
+    if (platform === 'gitlab') u = GITLAB.normalize(u, 'user');
+    state.user = u;
+    addAccount(platform, token, P.label + ' · ' + (u.login || '账号'));
+    state.repos = []; state.reposLoaded = false;
+    state.stars = []; state.starsLoaded = false;
+    enterShell(u); // 把已拿到的 u 交给 enterShell，避免 resetSession 清空后再重复拉一次 /user
+  } catch (e) {
+    let msg = e.message;
+    if (e && (e.name === 'TimeoutError' || /aborted|timeout/i.test(String(e.message || ''))))
+      msg = '登录验证超时（30 秒无响应），请检查网络或代理设置后重试';
+    else if (/failed to fetch|网络请求失败/i.test(msg))
+      msg += ' —— 无法连接 ' + P.label + '：请确认代理客户端已开启，或点上方「网络设置」更换代理';
+    $('#login-err').innerHTML = esc(msg);
+  } finally {
+    btn.disabled = false; btn.textContent = '进入控制台';
+  }
+}
+// 会话级状态集中清理：登录成功 / 登出 / 切账号统一走这里。
+// 此前逐字段手抄清理清单，已连续遗漏 selected、apiCache、starredSet 三次——收敛到单点。
+function resetSession(){
+  state.user = null;
+  state.tokenScopes = null; // Token 权限随账号变化，切号/登出后作废（requireScopes 横幅据此重判）
+  state.repos = []; state.reposLoaded = false;
+  state.selected.clear(); state.filter = 'all'; state.query = '';
+  state.stars = []; state.starsLoaded = false;
+  state.starredSet = new Set();
+  state.notifications = []; state.notifLoaded = false; state.notifAll = false; state.notifCount = 0;
+  state.gists = []; state.gistsLoaded = false;
+  state.searchResults = null; state.searchQuery = ''; state.searching = false;
+  state.repo = null; state.branches = []; state.branch = null;
+  state.tab = 'files'; state.path = ''; state.file = null;
+  state.commits = []; state.issues = []; state.issueFilter = 'open';
+  state.pulls = []; state.releases = []; state.runs = [];
+  apiCache.clear(); // 响应缓存：防跨账号驻留与 ETag 互踩
+  state.reqGen++;   // 作废所有在途加载（代际守卫会让旧响应静默退出）
+}
+function logout(msg){
+  resetSession();
+  $('#shell').classList.add('hidden');
+  $('#view-login').classList.remove('hidden');
+  renderLoginPlatforms();
+  loginPing();
+  if (msg) $('#login-err').innerHTML = esc(msg);
+}
+$('#login-btn').addEventListener('click', () => {
+  const t = $('#token-input').value.trim();
+  if (!t) { $('#login-err').innerHTML = '请先粘贴 Token'; return; }
+  tryLogin(loginPlatform, t);
+});
+$('#token-input').addEventListener('keydown', e => { if (e.key === 'Enter') $('#login-btn').click(); });
+$('#logout-btn').addEventListener('click', () => logout(''));
+
+/* ---------------- 导航 ---------------- */
+const NAV = [
+  ['overview', '总览', 'home'],
+  ['repos', '我的仓库', 'repo'],
+  ['stars', '我的收藏', 'star'],
+  ['notifications', '通知', 'bell'],
+  ['search', '搜索', 'search'],
+  ['gists', '代码片段', 'code'],
+  ['settings', '设置', 'gear'],
+];
+let currentView = 'overview';
+function renderNav(){
+  $('#side-nav').innerHTML = NAV.map(([k, label, ic]) => {
+    const badge = (k === 'notifications' && state.notifCount) ? '<span class="nav-badge">' + (state.notifCount > 99 ? '99+' : state.notifCount) + '</span>' : '';
+    return '<button class="nav-item ' + (currentView === k ? 'active' : '') + '" data-nav="' + k + '">' +
+      icon(ic) + '<span>' + label + '</span>' + badge + '</button>';
+  }).join('');
+  $$('#side-nav [data-nav]').forEach(b => b.addEventListener('click', () => showView(b.dataset.nav)));
+}
+async function refreshNotifCount(){
+  const P = activePlatform();
+  if (!P || !P.caps.notifications) { state.notifCount = 0; renderNav(); return; }
+  const gen = state.reqGen; // 代际守卫：切账号/登出后晚到的响应不写回
+  try {
+    const list = await api('GET', '/notifications?per_page=50');
+    if (gen !== state.reqGen) return;
+    state.notifCount = list.length;
+  } catch (e) { if (gen === state.reqGen) state.notifCount = 0; }
+  if (gen === state.reqGen) renderNav();
+}
+// 视图加载注册表：每个视图一个 loader，showView 只负责切换与派发
+const VIEW_LOADERS = {
+  overview: () => renderOverview(),
+  repos: () => renderRepos(),
+  stars: () => { if (!state.starsLoaded) loadStars(); },
+  notifications: () => {
+    const P = activePlatform();
+    if (!P || !P.caps.notifications) return renderUnsupported('通知', P);
+    loadNotifications();
+  },
+  gists: () => {
+    if (state.gistsLoaded) return;
+    const P = activePlatform();
+    if (!P || !P.caps.gists) return renderUnsupported('Gists', P);
+    loadGists();
+  },
+  search: () => renderSearch(),
+  settings: () => renderSettings(),
+};
+function showView(name){
+  currentView = name;
+  ['overview','repos','stars','notifications','search','gists','settings','repo'].forEach(v => {
+    const el = $('#view-' + v);
+    if (el) el.classList.toggle('hidden', v !== name);
+  });
+  renderNav();
+  $('#main').scrollTop = 0;
+  const loader = VIEW_LOADERS[name];
+  if (loader) loader();
+}
+function renderUnsupported(what, P){
+  const view = what === '通知' ? 'notifications' : 'gists';
+  $('#view-' + view).innerHTML =
+    '<div class="page-head"><div class="page-title">' + icon('issue') + ' ' + esc(what) + '</div></div>' +
+    '<div class="card empty">' + icon('issue', 40) +
+    '<div class="big">' + esc(P ? P.label : '当前平台') + ' 暂不支持' + esc(what) + '</div>' +
+    '<div>切换到其他平台后可用，或在顶栏切换账号</div></div>';
+}
+function renderTopbar(){
+  const a = activeAccount();
+  const P = a ? PLATFORMS[a.platform] : null;
+  $('#tb-platform-label').textContent = a ? (P.label + ' · ' + (state.user ? (state.user.login || a.label) : a.label)) : '未绑定';
+  const tb = $('#tb-theme');
+  if (tb) {
+    tb.innerHTML = icon(state.theme === 'dark' ? 'sun' : 'moon');
+    tb.title = state.theme === 'dark' ? '切换到浅色模式' : '切换到深色模式';
+  }
+  const th = $('#tb-home');
+  if (th) th.innerHTML = icon('home');
+}
+function renderPlatformMenu(){
+  const menu = $('#tb-menu');
+  menu.innerHTML = '<div class="menu-head">已绑定的平台账号（点击切换）</div>' +
+    (state.accounts.length
+      ? state.accounts.map((a, i) => {
+          const P = PLATFORMS[a.platform];
+          return '<div class="acct ' + (i === state.activeIdx ? 'active' : '') + '" data-ai="' + i + '">' +
+            '<span class="dot" style="background:var(--accent)"></span><span>' + esc(P.label) + '</span>' +
+            '<span style="color:var(--subtle);font-size:11.5px;flex:1;text-align:right">' + esc((a.label || '').split('·').pop().trim()) + '</span>' +
+            (i === state.activeIdx ? '<span class="badge def">当前</span>' : '') + '</div>';
+        }).join('')
+      : '<div class="acct" style="color:var(--muted)">还没有绑定账号</div>') +
+    '<div class="menu-foot"><button class="btn sm" id="tbm-manage">管理绑定</button></div>';
+  $$('#tb-menu .acct[data-ai]').forEach(el => el.addEventListener('click', () => {
+    state.activeIdx = Number(el.dataset.ai);
+    saveAccounts();
+    closeTbMenu();
+    state.repos = []; state.reposLoaded = false;
+    state.stars = []; state.starsLoaded = false;
+    state.notifications = []; state.notifLoaded = false;
+    state.gists = []; state.gistsLoaded = false;
+    state.user = null;
+    toast('已切换到 ' + PLATFORMS[activeAccount().platform].label);
+    enterShell();
+  }));
+  const mg = $('#tbm-manage');
+  if (mg) mg.addEventListener('click', () => { closeTbMenu(); showView('settings'); });
+}
+function closeTbMenu(){ $('#tb-menu').classList.remove('open'); }
+// 预拉收藏集合：让仓库/搜索视图登录后就能正确回显"已收藏"，无需先打开收藏页
+async function preloadStarredSet(){
+  const acct = activeAccount();
+  if (!acct || (acct.platform !== 'github' && acct.platform !== 'gitlab')) return;
+  const gen = state.reqGen;
+  try {
+    const out = [];
+    for (let page = 1; page <= 5; page++) {
+      const batch = await api('GET', '/user/starred?per_page=100&page=' + page);
+      if (gen !== state.reqGen) return; // 已切账号/登出，丢弃
+      out.push(...batch);
+      if (batch.length < 100) break;
+    }
+    if (state.starsLoaded || gen !== state.reqGen) return; // stars 视图已加载过则不覆盖
+    state.starredSet = new Set(out.map(r => r.full_name));
+    if (currentView === 'repos' || currentView === 'search') { /* 已渲染的卡片在下一次渲染时更新 */ }
+  } catch (e) { /* 静默：回显失败不影响主流程 */ }
+}
+function enterShell(preloadedUser){
+  resetSession(); // 登录/切账号：一次性清理全部会话状态（含 starredSet/selected/apiCache）
+  // 登录路径已在 tryLogin 里拿到用户对象，直接复用；其余入口（顶栏/设置切号、启动恢复）走下面的一次拉取
+  if (preloadedUser) state.user = preloadedUser;
+  $('#view-login').classList.add('hidden');
+  $('#shell').classList.remove('hidden');
+  $('#logout-btn').innerHTML = icon('logout') + '<span>退出登录</span>';
+  applyTheme();
+  renderTopbar();
+  renderNav();
+  if (!state.reposLoaded) loadRepos(); // 先启动 loadRepos（它 ++reqGen），后续预拉捕获新代际，互不作废
+  refreshNotifCount();
+  preloadStarredSet();
+  showView('overview');
+  if (!state.user && activeAccount()) {
+    const gen = state.reqGen; // 代际守卫：切号/登出后晚到的 /user 响应不写回，避免顶栏显示上一个账号
+    api('GET', '/user').then(u => {
+      if (gen !== state.reqGen) return;
+      state.user = u;
+      renderOverview();
+      renderTopbar();
+    }).catch(() => {});
+  }
+}
+
+/* ---------------- 仓库列表 ---------------- */
+async function loadRepos(){
+  const gen = ++state.reqGen;
+  try {
+    const out = [];
+    for (let page = 1; page <= 30; page++) {
+      const batch = await api('GET', '/user/repos?per_page=100&page=' + page + '&type=owner&sort=pushed');
+      if (gen !== state.reqGen) return;
+      out.push(...batch);
+      if (batch.length < 100) break;
+    }
+    if (gen !== state.reqGen) return;
+    out.sort((a, b) => (b.pushed_at || '').localeCompare(a.pushed_at || ''));
+    state.repos = out;
+    state.reposLoaded = true;
+    if (currentView === 'overview') renderOverview();
+    if (currentView === 'repos') renderRepos();
+  } catch (e) {
+    if (gen !== state.reqGen) return;
+    if (currentView === 'overview' || currentView === 'repos')
+      $('#view-' + currentView).innerHTML =
+        '<div class="card" style="border-color:var(--danger)"><b>仓库列表加载失败</b><br><span style="color:var(--muted)">' +
+        esc(e.message) + '</span><br><button class="btn" style="margin-top:12px" onclick="loadRepos()">重试</button></div>';
+  }
+}
+
+const FILTERS = [['all','全部'],['public','公开'],['private','私有'],['source','原创'],['fork','Fork'],['archived','已归档']];
+function filteredRepos(){
+  let list = state.repos;
+  const f = state.filter;
+  if (f === 'public') list = list.filter(r => !r.private);
+  if (f === 'private') list = list.filter(r => r.private);
+  if (f === 'fork') list = list.filter(r => r.fork);
+  if (f === 'source') list = list.filter(r => !r.fork);
+  if (f === 'archived') list = list.filter(r => r.archived);
+  const q = state.query.trim().toLowerCase();
+  if (q) list = list.filter(r => r.name.toLowerCase().includes(q) || (r.description || '').toLowerCase().includes(q));
+  return list;
+}
+
+function repoCard(r, mode){
+  mode = mode || 'repos';
+  const warn = r.private ? '<span class="badge pri">私有</span>' : '<span class="badge pub">公开</span>';
+  const fork = r.fork ? '<span class="badge fork">Fork</span>' : '';
+  const arch = r.archived ? '<span class="badge closed">已归档</span>' : '';
+  let checkbox = '';
+  if (mode === 'repos')
+    checkbox = '<input type="checkbox" data-check="' + r.id + '" ' + (state.selected.has(r.id) ? 'checked' : '') + ' title="选中用于批量删除">';
+  let firstBtn = '';
+  const starred = state.starredSet && state.starredSet.has(r.full_name);
+  if (mode === 'stars')
+    firstBtn = '<button class="btn sm danger-ghost" data-unstar="' + esc(r.full_name) + '">' + icon('starFill') + ' 取消收藏</button>';
+  else if (mode === 'search' || mode === 'repos')
+    firstBtn = starred
+      ? '<button class="btn sm danger-ghost" data-unstar="' + esc(r.full_name) + '">' + icon('starFill') + ' 已收藏</button>'
+      : '<button class="btn sm" data-star="' + esc(r.full_name) + '">' + icon('star') + ' 收藏</button>';
+  return `
+  <div class="repo-card">
+    <div class="top">
+      ${checkbox}
+      <div class="repo-name" title="${esc(r.full_name)}">${esc(r.name)}</div>
+      ${warn}${fork}${arch}
+    </div>
+    <div class="repo-desc">${esc(r.description || '（无描述）')}</div>
+    <div class="repo-meta">
+      ${r.language ? '<span><span class="dot" style="background:' + langColor(r.language) + '"></span>' + esc(r.language) + '</span>' : ''}
+      <span>${icon('star', 13)} ${r.stargazers_count ?? 0}</span>
+      <span>${fmtSize(r.size)}</span>
+      <span>${timeAgo(r.pushed_at || r.updated_at)}</span>
+    </div>
+    <div class="repo-acts">
+      ${firstBtn}
+      <button class="btn sm tint" data-open="${esc(r.full_name)}">${icon('eye')} 打开</button>
+      <a class="btn sm" href="${esc(r.html_url)}" target="_blank">${icon('ext')} 网页</a>
+    </div>
+  </div>`;
+}
+
+function skeletonGrid(){
+  return '<div class="repo-grid">' +
+    '<div class="skel skel-card"></div><div class="skel skel-card"></div><div class="skel skel-card"></div>' +
+    '<div class="skel skel-card"></div><div class="skel skel-card"></div><div class="skel skel-card"></div></div>';
+}
+
+function renderRepos(){
+  const warn = requireScopes();
+  const list = filteredRepos();
+  // 重建前记录搜索框焦点与光标（change 触发的重渲染不再丢焦点）
+  const prevSearch = (document.activeElement && document.activeElement.id === 'repo-search') ? document.activeElement : null;
+  const prevCaret = prevSearch ? prevSearch.selectionStart : null;
+  $('#view-repos').innerHTML = `
+    ${warn ? '<div class="warn-banner">' + icon('issue') + '<div>' + esc(warn) + '</div></div>' : ''}
+    <div class="page-head">
+      <div class="page-title">${icon('repo')} 我的仓库 <span class="cnt">${state.repos.length} 个</span></div>
+      <div class="page-actions">
+        <button class="btn primary" onclick="openCreateRepo()">${icon('plus')} 新建仓库</button>
+        <button class="btn" onclick="loadRepos()">${icon('refresh')} 刷新</button>
+      </div>
+    </div>
+    ${state.selected.size ? `
+    <div class="batch-bar">
+      ${icon('trash')} 已选中 <b>${state.selected.size}</b> 个仓库
+      <button class="btn sm" onclick="selectAllVisible()">全选当前结果</button>
+      <button class="btn sm" onclick="clearSelection()">取消选择</button>
+      <button class="btn sm danger" onclick="batchDelete()">${icon('trash')} 删除所选</button>
+    </div>` : ''}
+    <div class="toolbar">
+      <div class="chips">
+        ${FILTERS.map(([k, l]) => '<button class="chip ' + (state.filter === k ? 'active' : '') + '" data-filter="' + k + '">' + l + '</button>').join('')}
+      </div>
+      <input class="search" placeholder="搜索仓库名 / 描述…" value="${esc(state.query)}" id="repo-search">
+    </div>
+    ${!state.reposLoaded
+      ? skeletonGrid()
+      : (list.length
+        ? '<div class="repo-grid">' + list.map(r => repoCard(r, 'repos')).join('') + '</div>'
+        : '<div class="card empty">' + icon('repo', 40) + '<div class="big">没有符合条件的仓库</div><div>换个筛选条件，或点右上角新建</div></div>')}
+  `;
+  $$('#view-repos [data-filter]').forEach(c => c.addEventListener('click', () => {
+    state.filter = c.dataset.filter;
+    state.selected.clear(); // 切换筛选清空选中：否则批量删除会取到「当前不可见」的仓库（跨筛选残留）
+    renderRepos();
+  }));
+  $$('#view-repos [data-star]').forEach(b => b.addEventListener('click', async () => { if (await doStar(b.dataset.star, true, b)) renderRepos(); }));
+  $$('#view-repos [data-unstar]').forEach(b => b.addEventListener('click', async () => { if (await doStar(b.dataset.unstar, false, b)) renderRepos(); }));
+  const search = $('#repo-search');
+  search.addEventListener('input', () => { state.query = search.value; });
+  search.addEventListener('change', () => { state.selected.clear(); renderRepos(); }); // 改搜索词同样清空选中（避免跨筛选残留）
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); state.selected.clear(); renderRepos(); } });
+  if (prevSearch && search) {
+    search.focus();
+    if (prevCaret != null) { try { search.setSelectionRange(prevCaret, prevCaret); } catch (e) {} }
+  }
+  $$('#view-repos [data-check]').forEach(cb => cb.addEventListener('change', () => {
+    const id = Number(cb.dataset.check);
+    if (cb.checked) state.selected.add(id); else state.selected.delete(id);
+    renderRepos();
+  }));
+  $$('#view-repos [data-open]').forEach(b => b.addEventListener('click', () => openRepo(b.dataset.open)));
+}
+function selectAllVisible(){ filteredRepos().forEach(r => state.selected.add(r.id)); renderRepos(); }
+function clearSelection(){ state.selected.clear(); renderRepos(); }
+
+// 收藏/取消收藏统一入口：同步维护 starredSet，供各视图回显
+async function doStar(full, star, btn) {
+  const gen = state.reqGen; // R3-DEF3：starredSet 是跨账号共享的全局对象，在途切号后写回必须丢弃
+  if (btn) btn.disabled = true;
+  try {
+    await api(star ? 'PUT' : 'DELETE', '/user/starred/' + full);
+    if (gen !== state.reqGen) return false; // 已切号/登出：服务器侧作用于原账号本就正确，本地副作用全部丢弃（不污染新账号 starredSet、不误弹 toast）
+    if (star) state.starredSet.add(full); else state.starredSet.delete(full);
+    toast(star ? '已收藏 ' + full : '已取消收藏 ' + full);
+    return true;
+  } catch (e) {
+    if (gen === state.reqGen) toast('操作失败：' + e.message, 'err');
+    return false;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+function deleteModal(repos, onDone){
+  // 防御：state.user 可能尚未加载完成（null），多仓库确认短语回退到第一个仓库名
+  const need = repos.length === 1 ? repos[0].full_name : ((state.user && state.user.login) || repos[0].full_name);
+  confirmModal({
+    title: '永久删除 ' + repos.length + ' 个仓库',
+    body: '以下仓库将被<b>永久删除</b>：代码、Issue、PR、Release、Wiki 全部消失，此操作不可恢复。',
+    list: repos.map(r => r.full_name),
+    required: need,
+    okText: '确认删除',
+    onConfirm: async () => {
+      const raw = await runLimited(repos, 4, async (r) => {
+        await api('DELETE', '/repos/' + r.full_name, undefined, { fullName: r.full_name });
+      });
+      const results = raw.map((x, i) => x.ok
+        ? { ok: true, t: repos[i].full_name }
+        : { ok: false, t: repos[i].full_name + ' — ' + x.error.message });
+      const okN = results.filter(x => x.ok).length;
+      openModal(
+        '<div class="m-title">删除结果（' + okN + ' / ' + repos.length + ' 成功）</div>' +
+        '<div class="m-progress">' + results.map(x =>
+          '<div class="' + (x.ok ? 'okl' : 'faill') + '">' + (x.ok ? '✓ ' : '✗ ') + esc(x.t) + '</div>').join('') +
+        '</div><div class="m-actions"><button class="btn primary" onclick="closeModal()">好的</button></div>');
+      toast('已删除 ' + okN + ' / ' + repos.length + ' 个仓库');
+      if (onDone) onDone();
+    },
+  });
+}
+function batchDelete(){
+  const targets = state.repos.filter(r => state.selected.has(r.id));
+  if (!targets.length) return;
+  deleteModal(targets, () => { clearSelection(); state.reposLoaded = false; loadRepos(); });
+}
+
+function openCreateRepo(){
+  openModal(`
+    <div class="m-title">新建仓库</div>
+    <div class="m-field"><label class="field-label">仓库名称（字母、数字、- _ .）</label>
+      <input class="m-input" id="cr-name" autocomplete="off"></div>
+    <div class="m-field"><label class="field-label">描述（可选）</label>
+      <input class="m-input" id="cr-desc" autocomplete="off"></div>
+    <div class="m-field"><label class="field-label">可见性</label>
+      <div class="radio-row">
+        <label><input type="radio" name="cr-vis" value="private" checked> 私有</label>
+        <label><input type="radio" name="cr-vis" value="public"> 公开</label>
+      </div></div>
+    <label class="m-check"><input type="checkbox" id="cr-init" checked> 自动创建 README</label>
+    <div class="m-actions">
+      <button class="btn" id="cr-cancel">取消</button>
+      <button class="btn primary" id="cr-ok">${icon('plus')} 创建</button>
+    </div>
+  `);
+  $('#cr-cancel').addEventListener('click', closeModal);
+  $('#cr-name').focus();
+  $('#cr-ok').addEventListener('click', async () => {
+    const __ok = $('#cr-ok'); if (__ok.disabled) return;
+    const name = $('#cr-name').value.trim();
+    const desc = $('#cr-desc').value.trim();
+    const priv = document.querySelector('[name=cr-vis]:checked').value === 'private';
+    const init = $('#cr-init').checked;
+    if (!name) { toast('请填写仓库名称', 'err'); return; }
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast('名称只能包含字母、数字和 - _ .', 'err'); return; }
+    __ok.disabled = true;
+    try {
+      await api('POST', '/user/repos', { name, description: desc, private: priv, auto_init: init });
+      toast('仓库 ' + name + ' 创建成功');
+      closeModal();
+      state.reposLoaded = false;
+      loadRepos();
+    } catch (e) { __ok.disabled = false; toast('创建失败：' + e.message, 'err'); }
+  });
+}
+
+/* ---------------- 总览 ---------------- */
+function renderOverview(){
+  const u = state.user;
+  if (!u) return;
+  const warn = requireScopes();
+  const hour = new Date().getHours();
+  const greet = hour < 6 ? '夜深了' : hour < 12 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
+  const recent = state.repos.slice(0, 6);
+  // 仓库统计：远程（/user 字段）与本地（仓库列表）双源都统计，取更大值，悬停可看明细
+  const ownRepos = state.repos.filter(r => !r.fork);
+  const pubRemote = u.public_repos ?? null;
+  const pubLocal = state.reposLoaded ? ownRepos.filter(r => !r.private).length : null;
+  const priRemote = u.total_private_repos ?? null;
+  const priLocal = state.reposLoaded ? ownRepos.filter(r => r.private).length : null;
+  const statMax = (a, b) => (a == null && b == null) ? 0 : Math.max(a ?? 0, b ?? 0);
+  const pubCount = statMax(pubRemote, pubLocal);
+  const priCount = statMax(priRemote, priLocal);
+  const statTip = (r, l) => 'title="远程统计 ' + (r ?? '-') + ' · 本地统计 ' + (l ?? '-') + '"';
+  const pubTip = statTip(pubRemote, pubLocal);
+  const priTip = statTip(priRemote, priLocal);
+  $('#view-overview').innerHTML = `
+    ${warn ? '<div class="warn-banner">' + icon('issue') + '<div>' + esc(warn) + '</div></div>' : ''}
+    <div class="card hero">
+      <div class="user-row">
+        <img class="avatar" src="${esc(u.avatar_url)}" alt="">
+        <div>
+          <div class="user-name">${greet}，${esc(u.name || u.login)}</div>
+          <div class="user-login">@${esc(u.login)}</div>
+          ${u.bio ? '<div class="user-bio">' + esc(u.bio) + '</div>' : ''}
+        </div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat" ${pubTip}><div class="num">${pubCount}</div><div class="lbl">公开仓库</div></div>
+        <div class="stat" ${priTip}><div class="num">${priCount}</div><div class="lbl">私有仓库</div></div>
+        <div class="stat"><div class="num">${u.followers ?? 0}</div><div class="lbl">关注者</div></div>
+        <div class="stat"><div class="num">${u.following ?? 0}</div><div class="lbl">正在关注</div></div>
+      </div>
+    </div>
+    <div class="page-head" style="margin-top:24px"><div class="page-title">快捷操作</div></div>
+    <div class="page-actions">
+      <button class="btn primary" onclick="openCreateRepo()">${icon('plus')} 新建仓库</button>
+      <button class="btn" onclick="showView('repos')">${icon('trash')} 批量清理仓库</button>
+      <button class="btn" onclick="showView('notifications')">${icon('bell')} 查看通知</button>
+      <button class="btn" onclick="showView('search')">${icon('search')} 全局搜索</button>
+      <button class="btn" onclick="loadRepos()">${icon('refresh')} 刷新数据</button>
+    </div>
+    <div class="page-head" style="margin-top:24px"><div class="page-title">最近更新的仓库</div></div>
+    ${state.reposLoaded
+      ? (recent.length
+        ? '<div class="repo-grid">' + recent.map(r => repoCard(r, 'plain')).join('') + '</div>'
+        : '<div class="card empty">' + icon('repo', 40) + '<div class="big">还没有任何仓库</div><div>点上面「新建仓库」创建第一个</div></div>')
+      : skeletonGrid()}
+  `;
+  $$('#view-overview [data-open]').forEach(b => b.addEventListener('click', () => openRepo(b.dataset.open)));
+}
+</script>

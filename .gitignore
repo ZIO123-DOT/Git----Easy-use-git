@@ -1,0 +1,31 @@
+# 打包产物与运行数据
+release/
+.app-data/
+*.log
+
+# 历史备份与审计产物
+.backup-*/
+.audit/
+_audit_*
+_ls.txt
+deliverables/
+shots/
+
+# 一次性辅助脚本（非运行时源码）
+deploy_shortcuts.py
+github_wipe_repos.py
+make_icon.py
+shot_one.py
+take_shots.py
+
+# WorkBuddy 内部状态（非项目源码）
+.workbuddy/
+
+# QA 运行产物（下划线前缀 = 内部报告，非测试代码）
+electron-app/tests/_qa_*.txt
+electron-app/tests/_qa_*.json
+
+# 依赖与临时
+node_modules/
+.DS_Store
+Thumbs.db

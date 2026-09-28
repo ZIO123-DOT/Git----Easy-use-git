@@ -1,0 +1,598 @@
+<script>
+/* ============================================================
+   多平台适配层：GitHub / GitLab / Gitee / GitCode
+   - PLATFORMS: 平台定义（API 基址、认证头、能力、token 入口）
+   - accounts: 多账号管理（localStorage 持久化，可绑定多平台多账号）
+   - GitLab 适配器：把 GitHub 风格的 api() 调用翻译成 GitLab v4
+   - Gitee / GitCode：API v5 兼容 GitHub 风格，直接透传 + 轻量归一化
+   ============================================================ */
+const PLATFORMS = {
+  github: {
+    label: 'GitHub',
+    apiBase: 'https://api.github.com',
+    auth: t => ({ 'Authorization': 'Bearer ' + t }),
+    tokenUrl: 'https://github.com/settings/tokens/new?scopes=repo,delete_repo&description=Git控制台',
+    tokenHint: 'ghp_ 开头的 Classic Token，勾选 repo + delete_repo',
+    caps: { notifications: true, gists: true, actions: true, releases: true, editFile: true, search: true },
+  },
+  gitlab: {
+    label: 'GitLab',
+    apiBase: 'https://gitlab.com/api/v4',
+    auth: t => ({ 'PRIVATE-TOKEN': t }),
+    tokenUrl: 'https://gitlab.com/-/user_settings/personal_access_tokens?name=Git%E6%8E%A7%E5%88%B6%E5%8F%B0&scopes=api,delete_repository',
+    tokenHint: 'Personal Access Token，勾选 api + delete_repository',
+    caps: { notifications: false, gists: false, actions: true, releases: true, editFile: true, search: true },
+  },
+  gitee: {
+    label: 'Gitee',
+    apiBase: 'https://gitee.com/api/v5',
+    auth: () => ({}),
+    tokenUrl: 'https://gitee.com/profile/personal_access_tokens',
+    tokenHint: 'Gitee 私人令牌（勾选 projects, issues, pull_requests, user_info）',
+    caps: { notifications: false, gists: false, actions: false, releases: true, editFile: true, search: true },
+  },
+  gitcode: {
+    label: 'GitCode',
+    // 2026-09-15 实测：web-api.gitcode.com 是 CloudWAF 保护的前端域（对非浏览器客户端 418 拦截、带 Origin 直接断连），
+    // 真正的开放 API 域是 api.gitcode.com（Bearer 直连 200，且完整支持 CORS：204 预检 + ACAO 回显任意 Origin）
+    apiBase: 'https://api.gitcode.com/api/v5',
+    auth: t => ({ 'Authorization': 'Bearer ' + t }),
+    tokenUrl: 'https://gitcode.com/setting/token-classic/create',
+    tokenHint: 'GitCode 个人访问令牌（头像 → 个人设置 → 访问令牌 新建；v5 与 GitHub 风格兼容）',
+    caps: { notifications: false, gists: false, actions: false, releases: true, editFile: true, search: true },
+  },
+};
+
+/* ---------- 账号管理 ---------- */
+async function loadAccounts() {
+  const fromLocal = () => {
+    try {
+      let arr = JSON.parse(localStorage.getItem('gc_accounts') || '[]');
+      if (!Array.isArray(arr)) arr = [];
+      return arr;
+    } catch (e) { return []; }
+  };
+  // 优先加密库（桌面版 safeStorage/DPAPI）；Edge app 模式回退 localStorage
+  if (location.protocol !== 'file:') {
+    try {
+      const d = await fetch(bridgeURL('secrets-get')).then(r => r.json());
+      if (d && d.error) {
+        // 令牌库存在但读不出（加密不可用/库损坏/换机后 DPAPI 失效）：进入只读降级，禁止后续 saveAccounts 把空库写回——防止覆盖丢 Token
+        state.vaultReadOnly = true;
+        state.accounts = fromLocal();
+        setTimeout(() => toast('令牌库无法读取（换机/换用户后加密数据无法解密，属已知限制），已进入只读模式；请退出后重新登录以保存新 Token', 'err'), 800);
+      } else {
+        state.vaultReadOnly = false;
+        state.accounts = Array.isArray(d.accounts) ? d.accounts : fromLocal();
+        // 加密库读取成功：清除 localStorage 里的明文 Token 副本（历史遗留的回退数据）
+        localStorage.removeItem('gc_accounts');
+      }
+    } catch (e) { state.accounts = fromLocal(); }
+  } else {
+    state.accounts = fromLocal();
+  }
+  if (!Array.isArray(state.accounts)) state.accounts = [];
+  // 白名单重建：只保留 platform/token/label 三个已知字段，__proto__/constructor 等杂键自然被丢弃
+  const cleanAccounts = [];
+  for (const a of state.accounts) {
+    if (!a || typeof a !== 'object' || Array.isArray(a)) continue;
+    if (typeof a.token !== 'string' || !a.token || !PLATFORMS[a.platform]) continue;
+    cleanAccounts.push({
+      platform: a.platform,
+      token: a.token,
+      label: typeof a.label === 'string' && a.label ? a.label : PLATFORMS[a.platform].label,
+    });
+  }
+  state.accounts = cleanAccounts;
+  // 旧版单 token 迁移（迁移后必须立刻持久化，否则重启丢账号）
+  const legacy = localStorage.getItem('ghc_token');
+  let migrated = false;
+  if (legacy && !state.accounts.some(a => a.token === legacy)) {
+    state.accounts.push({ platform: 'github', label: 'GitHub', token: legacy });
+    migrated = true;
+  }
+  if (legacy) localStorage.removeItem('ghc_token');
+  if (migrated) await saveAccounts();
+  const idx = parseInt(localStorage.getItem('gc_active') || '0', 10);
+  state.activeIdx = state.accounts[idx] ? idx : (state.accounts.length ? 0 : -1);
+}
+function saveAccounts() {
+  // 只读降级：令牌库不可读时禁止落盘——空库写回会覆盖全部 Token（数据丢失链的最后一道闸）
+  if (state.vaultReadOnly) {
+    console.warn('saveAccounts: vault read-only, skip persist');
+    return;
+  }
+  localStorage.setItem('gc_active', String(Math.max(0, state.activeIdx)));
+  if (location.protocol === 'file:') {
+    // Edge / app 模式（file: 协议）没有 safeStorage 加密后端，只能落 localStorage 明文。
+    // 此处为非加密存储，属该模式下的已知限制（Electron 桌面模式走下面的加密库分支）。
+    localStorage.setItem('gc_accounts', JSON.stringify(state.accounts));
+    return;
+  }
+  // 加密库保存失败：绝不回退写 localStorage 明文（否则与「Windows 凭据加密存储」的宣传冲突）——
+  // 只提示用户，宁可让其重启后重新登录，也不落明文。
+  fetch(bridgeURL('secrets-set'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accounts: state.accounts }),
+  }).then(r => r.json()).then(d => {
+    if (!d || d.ok === false) toast('Token 保存失败，请注意重启后可能需重新登录', 'err');
+  }).catch(() => { toast('Token 保存失败，请注意重启后可能需重新登录', 'err'); });
+}
+function activeAccount() {
+  return state.accounts[state.activeIdx] || null;
+}
+function activePlatform() {
+  const a = activeAccount();
+  return a ? PLATFORMS[a.platform] : null;
+}
+function addAccount(platform, token, label) {
+  const P = PLATFORMS[platform];
+  const acct = { platform, token, label: label || P.label };
+  const i = state.accounts.findIndex(a => a.platform === platform && a.token === token);
+  if (i >= 0) { state.activeIdx = i; }
+  else { state.accounts.push(acct); state.activeIdx = state.accounts.length - 1; }
+  saveAccounts();
+}
+function removeAccount(i) {
+  const wasActive = i === state.activeIdx;
+  state.accounts.splice(i, 1);
+  if (state.activeIdx > i) state.activeIdx -= 1;       // 删的是前面的账号：指针左移
+  else if (wasActive) state.activeIdx = Math.min(i, state.accounts.length - 1); // 删的是当前：指向继任者
+  if (state.activeIdx < 0 && state.accounts.length) state.activeIdx = 0;
+  saveAccounts();
+}
+
+/* ---------- GitLab 适配器 ---------- */
+const GITLAB = {
+  enc: s => encodeURIComponent(s),
+  translate(method, path, body, fullName) {
+    // 把 GitHub 风格 path 翻译为 GitLab v4 调用；full = owner/repo（GitLab 支持多层嵌套组 group/sub/repo）。
+    // 路由分发：顶层（用户态/列表/搜索/通知）→ /repos/{full_name}/... 子路由（见 _translateRepo）。
+    // 匹配优先级：精确匹配 > startsWith 匹配 > 兜底；/user/starred/{full} PUT/DELETE 必须在 /user/starred 列表分支之前，否则被 startsWith 截胡。
+    // 第 4 参数 fullName（可选）：仓库上下文调用点传入 state.repo.full_name；当 path 命中 /repos/<fullName> 前缀时
+    // 按该前缀确定性切分（不进词表启发式），用于彻底消除「组名/文件名恰为子资源词」的固有歧义。
+    const qi = path.indexOf('?');
+    const p = qi >= 0 ? path.slice(0, qi) : path;
+    const qs = new URLSearchParams(qi >= 0 ? path.slice(qi + 1) : '');
+    const enc = encodeURIComponent;
+    const listQs = '&per_page=' + (qs.get('per_page') || 100) + '&page=' + (qs.get('page') || 1);
+
+    let url = null, norm = null, b = body;
+
+    // —— 顶层路径 ——
+    if (p === '/user') {
+      url = '/user'; norm = 'user';
+    } else if (p.startsWith('/user/repos')) {
+      // GitHub POST /user/repos → GitLab POST /projects（字段映射）
+      if (method === 'POST') {
+        url = '/projects';
+        b = {
+          name: body.name,
+          description: body.description || '',
+          visibility: body.private ? 'private' : 'public',
+          initialize_with_readme: !!body.auto_init,
+        };
+        norm = 'repo';
+      } else {
+        url = '/projects?membership=true&simple=false&statistics=true' + listQs + '&order_by=last_activity_at';
+        norm = 'repos';
+      }
+    } else if (/^\/user\/starred\/.+/.test(p) && (method === 'PUT' || method === 'DELETE')) {
+      // 收藏/取消收藏：full_name 取 /user/starred/ 之后的「全部段」，支持 GitLab 嵌套组 group/sub/repo
+      // （原来的 /^\/user\/starred\/[^/]+\/[^/]+$/ 只认两段，嵌套组会落到下面的 startsWith 列表分支 → 打到列表端点）
+      // 必须仍排在 /user/starred 列表分支之前，否则被 startsWith 截胡。
+      const full = p.slice('/user/starred/'.length);
+      url = '/projects/' + enc(full) + (method === 'PUT' ? '/star' : '/unstar');
+    } else if (p.startsWith('/user/starred')) {
+      // 收藏列表：翻页参数透传，避免 ≥100 收藏时重复拉第 1 页
+      url = '/projects?starred=true&simple=false' + listQs;
+      norm = 'repos';
+    } else if (p === '/notifications' || p.startsWith('/notifications')) {
+      url = '/notifications'; norm = 'unsupported';
+    } else if (p.startsWith('/gists')) {
+      url = '/gists'; norm = 'unsupported';
+    } else if (p.startsWith('/search/repositories')) {
+      // GitLab projects API 的合法排序字段是 star_count（GitHub 语义是 stars，勿照搬）
+      url = '/projects?search=' + enc(qs.get('q') || '') + '&simple=false&per_page=24&order_by=star_count';
+      norm = 'searchrepos';
+    } else {
+      // —— /repos/{full_name}/{rest} 子路由 ——
+      // full_name 支持 GitLab 嵌套组（group/sub/repo）：GitHub 两段式与 GitLab 嵌套组均需被正确解析。
+      const parts = p.split('/').filter(Boolean); // ['repos', ...full 段, ...rest 段]
+      const SUB_RES = /^(contents|branches|commits|issues|pulls|releases|actions|forks|star|git|labels|tags|milestones|topics)$/;
+      let full = null, rest = null;
+      if (parts[0] === 'repos' && parts.length >= 3) {
+        const prefix = '/repos/' + fullName;
+        if (fullName && (p === prefix || p.startsWith(prefix + '/'))) {
+          // 仓库上下文调用点（openRepo/loadContents/openFile/…/uploadOne 等）均已显式传入 opts.fullName，
+          // 故按「调用方已知的仓库 full_name」确定性切分，**完全不经过词表启发式**。
+          // 这彻底消除了自右向左启发式的固有歧义：不再依赖「路径段是否等于子资源词」来猜 full_name 边界——
+          // /repos/o/r/contents/contents、/repos/o/r/contents/branches、/repos/o/r/commits/issues、
+          // /repos/g1/g2/contents/issues 等都可按 full_name 长度精确切开。
+          full = fullName;
+          rest = p.slice(prefix.length);
+        } else {
+          // 无 fullName 提示（或 path 与提示前缀不符）：保持自右向左启发式兜底。
+          // 已知固有歧义：当第 2 层及更深的组名、或 /contents/ 下的文件名恰好等于词表词且其后还有子路径时
+          // （如 /repos/g1/g2/contents/branches、/repos/o/r/contents/branches），此模式无法完全消歧；
+          // 仓库上下文调用点已统一传 opts.fullName 走上方的确定性分支，不会落到此处。
+          // 从右往左找「最后一个」子资源词作为切分点，且起点不得早于索引 3：
+          // 索引 1/2 是 owner/repo 的位置——仓库名恰好等于词表词时（如 /repos/me/issues 里仓库名 issues），
+          // 从左往右切会把「仓库详情」误判成子资源端点；自右向左则让更深的词表命中优先被认作子资源。
+          let subIdx = -1;
+          for (let i = parts.length - 1; i >= 3; i--) {
+            if (SUB_RES.test(parts[i])) { subIdx = i; break; }
+          }
+          full = subIdx > 0 ? parts.slice(1, subIdx).join('/') : parts.slice(1).join('/');
+          rest = subIdx > 0 ? '/' + parts.slice(subIdx).join('/') : '';
+        }
+        const encd = enc(full);
+        const hit = GITLAB._translateRepo(method, rest, encd, qs, b);
+        // hit.method 必须回传：_translateRepo 会把「新建文件」由 PUT 改写为 POST（GitLab 语义），漏接收则改写失效
+        if (hit) { url = hit.url; b = hit.body; norm = hit.norm; if (hit.method) method = hit.method; }
+        else url = '/projects/' + encd + rest; // 兜底：未识别的子路径原样挂到 /projects/{encd} 下
+      }
+    }
+    // 兜底必须返回链上设置好的 url（保持原行为：未匹配任何顶层/仓库分支时 url 回退到原 p，保证非 /repos/* 的路径仍落到当前 GitLab 域名下）
+    return { url: url || p, method, body: b, norm };
+  },
+
+  // /repos/{owner}/{repo}/{rest} 子路由翻译器。
+  // 返回 {url, body, norm} 三元组，或返回 null 表示"未匹配，走兜底"（调用方负责把 rest 拼接到 /projects/{encd} 下）。
+  // 匹配顺序：精确匹配优先（避免 /issues 截胡 /issues/123、/releases 截胡 /releases/v1），其次 startsWith 匹配。
+  _translateRepo(method, rest, encd, qs, body) {
+    const enc = encodeURIComponent;
+    const ref = qs.get('ref');
+    const glState = qs.get('state') === 'open' ? 'opened' : qs.get('state') === 'closed' ? 'closed' : 'all';
+
+    // 仓库本身（空路径/根路径）
+    if (rest === '' || rest === '/') {
+      if (method === 'DELETE') return { url: '/projects/' + encd, body, norm: null };
+      if (method === 'PATCH') return { url: '/projects/' + encd, body: GITLAB.glPatchRepo(body), norm: 'repo' };
+      return { url: '/projects/' + encd, body, norm: 'repo' };
+    }
+    // Fork
+    if (rest === '/forks' && method === 'POST') return { url: '/projects/' + encd + '/fork', body, norm: 'repo' };
+
+    // Contents：tree（目录）| file（读/写/删）
+    if (rest.startsWith('/contents')) {
+      const after = rest.slice('/contents'.length);
+      if (after === '' || after === '/') {
+        return { url: '/projects/' + encd + '/repository/tree?per_page=100' + (ref ? '&ref=' + enc(ref) : ''), body, norm: 'tree' };
+      }
+      const fp = after.slice(1);
+      if (method === 'GET') {
+        // 调用方已用 encPath 逐段编码（文件路径/ref/分支名均含已编码的 %xx），此处不得二次编码——否则 % → %25 导致 404
+        return { url: '/projects/' + encd + '/repository/files/' + fp + (ref ? '?ref=' + ref : ''), body, norm: 'file' };
+      }
+      if (method === 'PUT' || method === 'POST') {
+        // GitHub 的 PUT /contents 是 upsert（创建 + 更新二合一），但 GitLab 的 PUT /repository/files
+        // 只用于「更新已存在文件」——创建必须 POST，更新才是 PUT 且带 last_commit_id。
+        // 故按「有无 body.sha」拆分方法；本方法的返回值由 translate() 接收并透传（见 translate 内 hit.method）。
+        const create = !(body && body.sha);
+        return {
+          url: '/projects/' + encd + '/repository/files/' + fp,
+          method: create ? 'POST' : 'PUT',
+          body: {
+            branch: (body && body.branch) || 'main',
+            content: body ? body.content : '',
+            commit_message: body ? body.message : (create ? 'create ' : 'update ') + fp,
+            ...(body && body.sha ? { last_commit_id: body.sha } : {}),
+            ...(body && body.encoding ? { encoding: body.encoding } : {}),
+          },
+          norm: null,
+        };
+      }
+      if (method === 'DELETE') {
+        // GitLab 删除文件不需要 last_commit_id（可选参数）。调用方传入的 body.sha 来自文件列表
+        // tree 接口的 id（blob SHA），与 GitLab last_commit_id 期望的「文件最后 commit SHA」不是同一对象，
+        // 传错会导致 400。故此处不映射 last_commit_id，不传则由 GitLab 用当前分支 HEAD 正常删除。
+        return {
+          url: '/projects/' + encd + '/repository/files/' + fp,
+          body: {
+            branch: (body && body.branch) || 'main',
+            commit_message: body ? body.message : 'delete ' + fp,
+          },
+          norm: null,
+        };
+      }
+    }
+
+    // Branches
+    if (rest === '/branches' && method === 'GET') return { url: '/projects/' + encd + '/repository/branches?per_page=100', body, norm: 'branches' };
+    if (rest === '/branches' && method === 'POST') return { url: '/projects/' + encd + '/repository/branches', body: { branch: body.name, ref: body.ref }, norm: null };
+
+    // Git refs：建/删分支
+    if (rest === '/git/refs' && method === 'POST') {
+      const refName = String((body && body.ref) || '').replace(/^refs\/heads\//, '');
+      return { url: '/projects/' + encd + '/repository/branches', body: { branch: refName, ref: (body && body.sha) || 'main' }, norm: null };
+    }
+    if (rest.startsWith('/git/refs/heads/') && method === 'DELETE') {
+      // 分支名调用方已 encodeURIComponent，此处不再编码
+      return { url: '/projects/' + encd + '/repository/branches/' + rest.split('/').pop(), body, norm: null };
+    }
+
+    // Commits
+    if (rest === '/commits') {
+      return { url: '/projects/' + encd + '/repository/commits?per_page=30' + (qs.get('sha') ? '&ref_name=' + enc(qs.get('sha')) : ''), body, norm: 'commits' };
+    }
+
+    // Issues（list / create / patch / comment）—— /issues 与 /issues/123 必须独立匹配
+    if (rest === '/issues' && method === 'GET') return { url: '/projects/' + encd + '/issues?per_page=100&scope=all&state=' + glState, body, norm: 'issues' };
+    if (rest === '/issues' && method === 'POST') return { url: '/projects/' + encd + '/issues', body: { title: body.title, description: body.body || '' }, norm: null };
+    if (/^\/issues\/\d+$/.test(rest) && method === 'PATCH') {
+      return { url: '/projects/' + encd + '/issues/' + rest.split('/')[2], body: { state_event: body.state === 'closed' ? 'close' : 'reopen' }, norm: null };
+    }
+    if (/^\/issues\/\d+\/comments$/.test(rest) && method === 'POST') {
+      return { url: '/projects/' + encd + '/issues/' + rest.split('/')[2] + '/notes', body: { body: body.body }, norm: null };
+    }
+
+    // Pulls（MR）
+    if (rest === '/pulls') return { url: '/projects/' + encd + '/merge_requests?per_page=50&state=all', body, norm: 'pulls' };
+    if (/^\/pulls\/\d+\/files$/.test(rest) && method === 'GET') {
+      return { url: '/projects/' + encd + '/merge_requests/' + rest.split('/')[2] + '/changes', body, norm: 'prfiles' };
+    }
+
+    // Releases
+    if (rest === '/releases' && method === 'GET') return { url: '/projects/' + encd + '/releases', body, norm: 'releases' };
+    if (/^\/releases\/[^/]+$/.test(rest) && method === 'DELETE') {
+      return { url: '/projects/' + encd + '/releases/' + enc(decodeURIComponent(rest.split('/')[2])), body, norm: null };
+    }
+
+    // Actions → Pipelines
+    if (rest === '/actions/runs') return { url: '/projects/' + encd + '/pipelines?per_page=20', body, norm: 'pipelines' };
+
+    // Star / Unstar（仓库级）
+    if (rest === '/star' && method === 'PUT')    return { url: '/projects/' + encd + '/star',    body, norm: null };
+    if (rest === '/star' && method === 'DELETE') return { url: '/projects/' + encd + '/unstar',  body, norm: null };
+
+    return null; // 未识别子路径 → 调用方走兜底
+  },
+
+  glPatchRepo(b) {
+    const out = {};
+    if (b.name !== undefined) { out.name = b.name; }
+    if (b.description !== undefined) out.description = b.description;
+    if (b.default_branch !== undefined) out.default_branch = b.default_branch;
+    if (b.private !== undefined) out.visibility = b.private ? 'private' : 'public';
+    if (b.archived !== undefined) out.archived = b.archived;
+    return out;
+  },
+  nRepo(p) {
+    const out = {
+      id: p.id, name: p.path, full_name: p.path_with_namespace,
+      private: p.visibility !== 'public', fork: !!p.forked_from_project,
+      archived: !!p.archived, description: p.description || '',
+      language: p.language || null, size: p.statistics ? Math.round(p.statistics.repository_size / 1024) : null,
+      pushed_at: p.last_activity_at, stargazers_count: p.star_count ?? 0,
+      html_url: p.web_url, default_branch: p.default_branch || 'main',
+      viewer_has_starred: undefined, forks_count: p.forks_count ?? 0,
+      open_issues_count: p.open_issues_count ?? 0,
+    };
+    out.permissions_admin = !!(p.permissions && (
+      (p.permissions.project_access && p.permissions.project_access.access_level >= 40) ||
+      (p.permissions.group_access && p.permissions.group_access.access_level >= 40)));
+    return out;
+  },
+  normalize(data, norm) {
+    if (data === null || data === undefined) return data;
+    switch (norm) {
+      case 'user': {
+        const u = data;
+        return { login: u.username, name: u.name, bio: u.bio || '', avatar_url: u.avatar_url, html_url: u.web_url, public_repos: null, total_private_repos: null, followers: null, following: null };
+      }
+      case 'repos': return (Array.isArray(data) ? data : []).map(p => GITLAB.nRepo(p));
+      case 'searchrepos': return { items: (Array.isArray(data) ? data : []).map(p => GITLAB.nRepo(p)) };
+      case 'repo': return GITLAB.nRepo(data);
+      case 'tree': return (data || []).map(e => ({ name: e.name, path: e.path, type: e.type === 'tree' ? 'dir' : 'file', size: null, sha: e.id }));
+      case 'file': {
+        const f = data;
+        return { name: f.file_name, path: f.file_path, sha: f.last_commit_id, size: f.size, encoding: 'base64', content: f.content || '', html_url: null, download_url: null };
+      }
+      case 'branches': return (data || []).map(b => ({ name: b.name, commit: { sha: (b.commit && b.commit.id) || '' }, merged: !!b.merged, default: !!b.default }));
+      case 'commits': return (data || []).map(c => ({
+        sha: c.id, html_url: c.web_url,
+        commit: { message: c.message || '', author: { name: c.author_name, date: c.committed_date || c.created_at } },
+        author: { login: c.author_name },
+      }));
+      case 'issues': return (data || []).filter(x => !x.merge_request).map(x => ({
+        number: x.iid, title: x.title, state: x.state === 'opened' ? 'open' : 'closed',
+        user: { login: x.author ? x.author.username : '' }, created_at: x.created_at,
+        comments: x.user_notes_count ?? 0, labels: (x.labels || []).map(l => ({ name: typeof l === 'string' ? l : l.name, color: '6d8cff' })),
+        html_url: x.web_url,
+      }));
+      case 'pulls': return (data || []).map(x => ({
+        number: x.iid, title: x.title, state: x.state === 'opened' ? 'open' : x.state,
+        merged: !!x.merged_at, merged_at: x.merged_at || null, user: { login: x.author ? x.author.username : '' },
+        head: { ref: x.source_branch }, base: { ref: x.target_branch },
+        updated_at: x.updated_at, html_url: x.web_url,
+      }));
+      case 'releases': return (data || []).map(x => ({
+        id: x.tag_name, tag_name: x.tag_name, name: x.name || x.tag_name,
+        prerelease: false, draft: false, published_at: x.released_at || x.created_at,
+        author: { login: x.author ? (x.author.username || x.author.name) : '' },
+        assets: { length: (x.assets && x.assets.sources ? x.assets.sources.length : 0) },
+        html_url: (x._links && x._links.self) || x.web_url,
+      }));
+      case 'prfiles': return (data && data.changes ? data.changes : []).map(x => ({
+        filename: x.new_path, status: x.new_file ? 'added' : x.deleted_file ? 'removed' : 'modified',
+        additions: null, deletions: null, patch: x.diff || '',
+      }));
+      case 'pipelines': return {
+        workflow_runs: (data || []).map(x => ({
+          id: x.id, name: x.ref, display_title: 'Pipeline #' + x.id,
+          status: x.status === 'success' ? 'completed' : x.status === 'failed' ? 'completed' : x.status === 'running' ? 'in_progress' : x.status === 'pending' ? 'queued' : 'completed',
+          conclusion: x.status === 'success' ? 'success' : x.status === 'failed' ? 'failure' : x.status === 'canceled' ? 'cancelled' : null,
+          event: 'pipeline', head_branch: x.ref, run_number: x.id,
+          created_at: x.created_at, html_url: x.web_url,
+        })),
+      };
+      default: return data;
+    }
+  },
+};
+
+/* ---------- 桥接调用（带一次性令牌，P1 修复） ---------- */
+function bridgeURL(action, extra) {
+  const tk = decodeURIComponent((location.hash || '').replace(/^#/, '')).replace(/^tk=/, '');
+  return '/bridge?action=' + action + (extra || '') + '&tk=' + encodeURIComponent(tk);
+}
+
+/* ---------- GET 响应 ETag 缓存（命中 304 不计费，省 rate limit） ---------- */
+const apiCache = new Map();
+const API_CACHE_MAX = 120;
+
+/* ---------- 并发限流执行器（批量操作防触发平台二级限流） ---------- */
+async function runLimited(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const run = async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      try { results[i] = { ok: true, value: await worker(items[i], i) }; }
+      catch (e) { results[i] = { ok: false, error: e }; }
+    }
+  };
+  const lanes = Math.max(1, Math.min(limit || 4, items.length));
+  await Promise.all(Array.from({ length: lanes }, run));
+  return results;
+}
+
+/* ---------- 统一 API 入口（平台感知） ---------- */
+function updateRate(resp, gen) {
+  const h = (n) => resp.headers.get(n);
+  // GitHub 通过响应头 X-OAuth-Scopes 暴露当前 Token 的权限，存入 state（供 requireScopes 判断）。
+  // 依据：GitHub 官方 CORS 文档明列 Access-Control-Expose-Headers 含 X-OAuth-Scopes
+  // （docs.github.com/rest/using-the-rest-api/using-cors-and-jsonp-to-make-cross-origin-requests），
+  // 故跨域下该头确实可被渲染进程读出——requireScopes 是真实现，非空壳。
+  // GitLab / Gitee / GitCode 无等价的权限响应头（拿不到）→ 不写入，requireScopes 据此返回 null
+  // → 对外表现为「该平台横幅不显示」，属平台能力差异下的诚实降级，不编造。
+  const scopes = h('X-OAuth-Scopes');
+  // C-8：切账号后，在途请求的旧 scopes 不得写回（否则 requireScopes 横幅按上一个账号误判）
+  if (scopes !== null && (gen === undefined || gen === state.reqGen)) state.tokenScopes = scopes.split(',').map(s => s.trim()).filter(Boolean);
+  const rem = h('X-RateLimit-Remaining') ?? h('RateLimit-Remaining');
+  const lim = h('X-RateLimit-Limit') ?? h('RateLimit-Limit');
+  const reset = h('X-RateLimit-Reset') ?? h('RateLimit-Reset');
+  if (rem !== null && $('#rate-line')) {
+    // 响应头值不进 innerHTML（textContent 不可注入，防头注入 XSS）
+    const el = $('#rate-line');
+    el.textContent = 'API 余量 ' + rem + ' / ' + (lim ?? '?') + (reset ? ' · 重置于 ' + new Date(Number(reset) * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '');
+  }
+}
+async function api(method, path, body, opts) {
+  const acct = activeAccount();
+  if (!acct) throw new Error('未绑定任何平台账号');
+  const P = PLATFORMS[acct.platform];
+  const headers = Object.assign({ 'Accept': 'application/json' }, P.auth(acct.token));
+  let sendBody = body;
+  let norm = null;
+  // Gitee / GitCode 无 GitHub 的 /git/refs 端点（git data API），建/删分支需改写为其 /branches 端点：
+  //   建分支 POST /repos/{o}/{r}/branches，body { branch_name, refs }（refs 为源分支/commit）；
+  //   删分支 DELETE /repos/{o}/{r}/branches/{branch}。
+  if (acct.platform === 'gitee' || acct.platform === 'gitcode') {
+    let m;
+    if (method === 'POST' && (m = path.match(/^(\/repos\/[^/]+\/[^/]+)\/git\/refs$/))) {
+      const bn = String((sendBody && sendBody.ref) || '').replace(/^refs\/heads\//, '');
+      path = m[1] + '/branches';
+      sendBody = { branch_name: bn, refs: (sendBody && sendBody.sha) || '' };
+    } else if (method === 'DELETE' && (m = path.match(/^(\/repos\/[^/]+\/[^/]+)\/git\/refs\/heads\/(.+)$/))) {
+      path = m[1] + '/branches/' + m[2];
+    }
+  }
+  let url = P.apiBase + path;
+  if (acct.platform === 'gitee') {
+    url += (url.includes('?') ? '&' : '?') + 'access_token=' + encodeURIComponent(acct.token);
+  }
+  // Gitee / GitCode 的 contents 写接口与 GitLab 同构（两者官方文档均确认）：
+  //   新建文件 = POST /repos/{o}/{r}/contents/{path}；更新文件 = PUT 且必须带 sha。
+  // 本项目调用方沿用 GitHub 的「PUT 兼做创建+更新」语义，故此处对「无 sha 的写文件请求」同构改写为 POST。
+  // （仅命中 /contents/ 写路径；目录列举是 GET，不受影响。）
+  if ((acct.platform === 'gitee' || acct.platform === 'gitcode') &&
+      method === 'PUT' && /\/contents\//.test(path) && !(sendBody && sendBody.sha)) {
+    method = 'POST';
+  }
+  if (acct.platform === 'gitlab') {
+    // opts.fullName：仓库上下文调用点传入 state.repo.full_name，供 translate 对 /repos/* 路径做确定性切分
+    const t = GITLAB.translate(method, path, body, opts && opts.fullName);
+    url = P.apiBase + t.url;
+    method = t.method; sendBody = t.body; norm = t.norm;
+    if (t.norm === 'unsupported') throw new Error('GitLab 平台暂不支持此功能');
+  }
+  // 30s 超时：平台 API 假死（代理半连接等）时不再永久挂起骨架屏
+  const opt = { method, headers, signal: AbortSignal.timeout(30000) };
+  if (sendBody !== undefined) { headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(sendBody); }
+  const cacheable = method === 'GET';
+  // 缓存键含账号指纹（token 末 8 位）：同平台多账号互不踩缓存，也不跨账号驻留数据
+  const acctFp = acct.platform + '#' + (acct.token || '').slice(-8);
+  const cacheKey = cacheable ? (acctFp + ':' + url) : '';
+  if (cacheable) {
+    const hit = apiCache.get(cacheKey);
+    if (hit && hit.etag) headers['If-None-Match'] = hit.etag;
+  }
+  let resp = null;
+  const reqGen = state.reqGen; // C-8：请求发起时的代际，供 updateRate 校验（切账号后旧 scopes 不写回）
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { resp = await fetch(url, opt); }
+    catch (e) {
+      const timedOut = e && (e.name === 'TimeoutError' || /aborted|timeout/i.test(String(e.message || '')));
+      throw new Error(timedOut ? '请求超时（30 秒无响应），请检查网络或代理设置' : '网络请求失败，请检查网络连接');
+    }
+    updateRate(resp, reqGen);
+    if (resp.status === 204) return null;
+    if (resp.status === 304 && cacheable && apiCache.has(cacheKey)) {
+      return apiCache.get(cacheKey).data;
+    }
+    if (resp.status === 304 && attempt === 0) {
+      // 缓存条目已被 LRU 逐出：去掉条件请求头强制重拉，而不是落到错误分支报 "HTTP 304"
+      delete headers['If-None-Match'];
+      continue;
+    }
+    if (resp.status === 304) {
+      // C-7：二次 304（正常语义下不应发生，仅服务端/代理异常时可达）——给可读错误而非裸 "HTTP 304"
+      throw new Error('服务端缓存异常（HTTP 304），请稍后重试');
+    }
+    break;
+  }
+  let data = null;
+  try { data = await resp.json(); } catch (e) {}
+  if (resp.ok) {
+    let out = data;
+    if (acct.platform === 'gitlab' && norm) out = GITLAB.normalize(data, norm);
+    // GitCode v5 仓库对象缺 html_url/archived/size（2026-09-15 实测）：轻量补默认值，
+    // 否则「网页」链接为空、归档徽章逻辑失效；有 full_name 的对象才视为仓库形态
+    if (acct.platform === 'gitcode' && out && typeof out === 'object') {
+      const gcFix = (r) => {
+        if (!r || typeof r !== 'object' || Array.isArray(r) || !r.full_name) return;
+        if (!r.html_url) r.html_url = r.web_url || ('https://gitcode.com/' + r.full_name);
+        if (r.archived === undefined) r.archived = false;
+        if (r.size === undefined) r.size = null;
+      };
+      if (Array.isArray(out)) out.forEach(gcFix); else gcFix(out);
+    }
+    if (cacheable) {
+      const et = resp.headers.get('ETag');
+      if (et) {
+        if (apiCache.size >= API_CACHE_MAX) apiCache.delete(apiCache.keys().next().value);
+        apiCache.set(cacheKey, { etag: et, data: out });
+      }
+    }
+    return out;
+  }
+  const msg = data && (data.message || data.error) ? (data.message || data.error) : ('HTTP ' + resp.status);
+  if (resp.status === 401) { logout('当前平台的 Token 已失效，请重新登录'); }
+  const err = new Error(msg); err.status = resp.status; throw err;
+}
+function requireScopes() {
+  // 仅 GitHub 通过响应头 X-OAuth-Scopes 暴露 Token 权限（updateRate 已存入 state.tokenScopes）；
+  // 该头确在 GitHub CORS 的 Access-Control-Expose-Headers 白名单内（见 updateRate 注释所引官方文档），
+  // 故 GitHub 分支是真实现。GitLab / Gitee / GitCode 无等价信息 → 返回 null；对外表现为
+  // 「该平台无法获取该权限信息，横幅不显示」，属平台能力差异下的诚实降级，
+  // 而非「有入口、有提示、底层却不生效」的空壳。
+  const acct = activeAccount();
+  if (!acct || acct.platform !== 'github') return null;
+  if (!Array.isArray(state.tokenScopes)) return null; // 尚未收到任何带 scope 头的响应，不误报
+  if (state.tokenScopes.includes('delete_repo')) return null;
+  return '当前 GitHub Token 未勾选 delete_repo 权限，删除仓库会失败。请到 GitHub 重新生成 Token 并勾选 delete_repo 后再试。';
+}
+</script>

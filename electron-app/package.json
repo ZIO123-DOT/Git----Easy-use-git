@@ -1,0 +1,7 @@
+{
+  "name": "git-console-pro",
+  "productName": "Git 控制台",
+  "version": "1.0.0",
+  "private": true,
+  "main": "desktop.cjs"
+}

@@ -1,0 +1,1009 @@
+<script>
+/* ---------------- 仓库详情 ---------------- */
+const REPO_TABS = [
+  ['files', '文件', 'folder'],
+  ['commits', 'Commits', 'commit'],
+  ['branches', '分支', 'branch'],
+  ['issues', 'Issues', 'issue'],
+  ['pulls', 'PR', 'pr'],
+  ['releases', 'Releases', 'tag'],
+  ['actions', 'Actions', 'zap'],
+  ['settings', '设置', 'gear'],
+];
+
+async function openRepo(fullName){
+  const gen = state.reqGen; // 代际守卫：切号/登出后晚到的仓库详情不写回（否则详情/分支被上一个仓库覆盖）
+  try {
+    showView('repo');
+    $('#view-repo').innerHTML = '<div class="loading"><div class="spinner"></div>正在打开仓库 ...</div>';
+    // opts.fullName：openRepo 的仓库由入参 fullName 指定（此刻 state.repo 可能还是上一个仓库），故显式传入
+    const repo = await api('GET', '/repos/' + fullName, undefined, { fullName });
+    if (gen !== state.reqGen) return;
+    let branches;
+    try { branches = await api('GET', '/repos/' + fullName + '/branches?per_page=100', undefined, { fullName }); }
+    catch (e) { branches = []; }
+    if (gen !== state.reqGen) return; // 两次 await 之后统一写回，避免旧响应污染 state
+    state.repo = repo;
+    state.branches = branches;
+    state.branch = repo.default_branch;
+    state.path = '';
+    state.file = null;
+    state.tab = 'files';
+    renderRepoDetail();
+    loadContents();
+    refreshNotifCount();
+  } catch (e) {
+    if (gen !== state.reqGen) return;
+    $('#view-repo').innerHTML =
+      '<div class="card" style="border-color:var(--danger)"><b>打开仓库失败</b><br><span style="color:var(--muted)">' +
+      esc(e.message) + '</span><br><button class="btn" style="margin-top:12px" onclick="showView(currentViewBack())">返回</button></div>';
+  }
+}
+function currentViewBack(){ return state.reposLoaded ? 'repos' : 'overview'; }
+
+function isStarred(){ return state.repo && (state.starredSet.has(state.repo.full_name) || state.repo.viewer_has_starred); }
+
+function renderRepoDetail(){
+  const r = state.repo;
+  const caps = activePlatform() ? activePlatform().caps : {};
+  const r0 = state.repo || {};
+  const canAdmin = !!(r0.permissions && r0.permissions.admin === true) || !!r0.permissions_admin || r0.permission === 'admin' ||
+    !!(r0.owner && state.user && r0.owner.login === state.user.login);
+  const visTabs = REPO_TABS.filter(([k]) => (k === 'actions' ? !!caps.actions : k === 'releases' ? !!caps.releases : k === 'settings' ? !!canAdmin : true));
+  if (!visTabs.some(([k]) => k === state.tab)) state.tab = 'files';
+  const tabs = visTabs
+    .map(([k, l, ic]) =>
+      '<button class="tab ' + (state.tab === k ? 'active' : '') + '" data-tab="' + k + '">' + icon(ic) + ' ' + l + '</button>').join('');
+  $('#view-repo').innerHTML = `
+    <div class="page-head">
+      <button class="btn" onclick="showView('repos')">${icon('back')} 返回列表</button>
+      <div class="page-actions">
+        <button class="btn" id="rd-star">${icon(isStarred() ? 'starFill' : 'star')} ${isStarred() ? '取消收藏' : '收藏'}</button>
+        <button class="btn" id="rd-fork">${icon('fork')} Fork</button>
+        <a class="btn" href="${esc(r.html_url)}" target="_blank">${icon('ext')} 在网页打开</a>
+        <button class="btn danger" id="rd-del">${icon('trash')} 删除</button>
+      </div>
+    </div>
+    <div class="card hero">
+      <div class="repo-head-top">
+        <div class="repo-head-main">
+          <div class="repo-title">${esc(r.name)}
+            ${r.private ? '<span class="badge pri">私有</span>' : '<span class="badge pub">公开</span>'}
+            ${r.fork ? '<span class="badge fork">Fork</span>' : ''}
+            ${r.archived ? '<span class="badge closed">已归档</span>' : ''}
+          </div>
+          <div class="user-bio">${esc(r.description || '（无描述）')}</div>
+          <div class="meta-line">
+            <span class="meta-item">${icon('star')} <b>${r.stargazers_count ?? 0}</b></span>
+            <span class="meta-item">${icon('fork')} <b>${r.forks_count ?? 0}</b></span>
+            <span class="meta-item">${icon('issue')} <b>${r.open_issues_count ?? 0}</b></span>
+            ${r.watchers_count != null ? '<span class="meta-item">' + icon('eye') + ' <b>' + r.watchers_count + '</b></span>' : ''}
+            ${r.language ? '<span class="meta-item"><span class="dot" style="background:' + langColor(r.language) + '"></span>' + esc(r.language) + '</span>' : ''}
+            <span class="meta-item">${fmtSize(r.size)}</span>
+            <span class="meta-item">默认分支 <b>${esc(r.default_branch)}</b></span>
+          </div>
+        </div>
+      </div>
+      <div class="tabs">${tabs}</div>
+      <div id="repo-body"></div>
+    </div>
+  `;
+  $$('#view-repo [data-tab]').forEach(t => t.addEventListener('click', () => {
+    state.tab = t.dataset.tab;
+    state.file = null;
+    renderRepoDetail();
+    ({ files: loadContents, commits: loadCommits, branches: loadBranches,
+       issues: loadIssues, pulls: loadPulls, releases: loadReleases,
+       actions: loadRuns, settings: renderRepoSettings }[state.tab] || (() => {}))();
+  }));
+  $('#rd-star').addEventListener('click', starToggle);
+  $('#rd-fork').addEventListener('click', forkRepo);
+  $('#rd-del').addEventListener('click', () => deleteModal([state.repo], () => {
+    state.reposLoaded = false;
+    loadRepos();
+    showView('repos');
+  }));
+}
+
+async function starToggle(){
+  const repo = state.repo; // 捕获调用时的仓库引用：await 后不得再读实时 state.repo（否则在途切仓库会污染新仓库）
+  const full = repo && repo.full_name;
+  if (!repo || !full) return;
+  const gen = state.reqGen; // R3-DEF3：starredSet 是跨账号共享的全局对象，在途切号后写回必须丢弃（第二轮只修了 state.repo 捕获，遗漏此处）
+  try {
+    const starred = state.starredSet.has(full) || repo.viewer_has_starred; // 以 starredSet 为准
+    if (starred) {
+      await api('DELETE', '/user/starred/' + full, undefined, { fullName: full });
+      if (gen !== state.reqGen) return; // 已切号/登出：丢弃本地副作用
+      state.starredSet.delete(full); // C-3：同步维护，列表/搜索卡片才能回显
+      repo.viewer_has_starred = false;
+      repo.stargazers_count = Math.max(0, (repo.stargazers_count || 1) - 1);
+      toast('已取消收藏');
+    } else {
+      await api('PUT', '/user/starred/' + full, undefined, { fullName: full });
+      if (gen !== state.reqGen) return; // 已切号/登出：丢弃本地副作用
+      state.starredSet.add(full); // C-3：同上
+      repo.viewer_has_starred = true;
+      repo.stargazers_count = (repo.stargazers_count || 0) + 1;
+      toast('已收藏');
+    }
+    if (state.repo === repo) renderRepoDetail(); // 仅仍停留在同一仓库时才刷新详情
+  } catch (e) { if (gen === state.reqGen) toast('操作失败：' + e.message, 'err'); }
+}
+
+async function forkRepo(){
+  confirmModal({
+    title: 'Fork 仓库',
+    body: '将 <b>' + esc(state.repo.full_name) + '</b> 复制一份到自己账号下？',
+    required: state.repo.name,
+    okText: '确认 Fork',
+    onConfirm: async () => {
+      const nw = await api('POST', '/repos/' + state.repo.full_name + '/forks', undefined, { fullName: state.repo.full_name });
+      toast('Fork 已创建：' + nw.full_name);
+      state.reposLoaded = false;
+      loadRepos();
+    },
+  });
+}
+
+/* ================= 文件 ================= */
+async function loadContents(){
+  const gen = ++state.reqGen;
+  const body = $('#repo-body');
+  if (!body || !state.repo) return;
+  body.innerHTML = '<div class="loading"><div class="spinner"></div>正在加载 ...</div>';
+  try {
+    const branch = state.branch || state.repo.default_branch;
+    let p = '/repos/' + state.repo.full_name + '/contents';
+    if (state.path) p += '/' + encPath(state.path);
+    p += '?ref=' + encodeURIComponent(branch);
+    const entries = await api('GET', p, undefined, { fullName: state.repo.full_name });
+    if (gen !== state.reqGen) return;
+    if (!Array.isArray(entries)) throw new Error('返回数据异常');
+    entries.sort((a, b) => {
+      const ta = a.type === 'dir' ? 0 : 1, tb = b.type === 'dir' ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+      return a.name.localeCompare(b.name, 'zh-CN');
+    });
+    const crumbs = ['<span class="crumb" data-crumb="">根目录</span>'];
+    if (state.path) {
+      const parts = state.path.split('/');
+      let acc = '';
+      parts.forEach((seg, i) => {
+        acc = acc ? acc + '/' + seg : seg;
+        crumbs.push('<span class="crumb-sep">/</span><span class="crumb ' + (i === parts.length - 1 ? 'here' : '') + '" data-crumb="' + esc(acc) + '">' + esc(seg) + '</span>');
+      });
+    }
+    body.innerHTML = `
+      <div class="toolbar">
+        <select class="btn" id="branch-sel" style="padding:8px 11px">
+          ${state.branches.map(b => '<option value="' + esc(b.name) + '" ' + (b.name === branch ? 'selected' : '') + '>' + esc(b.name) + '</option>').join('')}
+        </select>
+        <div class="crumbs">${crumbs.join('')}</div>
+        <button class="btn sm primary" style="margin-left:auto" id="btn-newfile">${icon('plus')} 新建文件</button>
+        <button class="btn sm" id="btn-rf">${icon('refresh')}</button>
+      </div>
+      ${entries.length
+        ? '<div class="row-list">' + entries.map(e => {
+            const isDir = e.type === 'dir';
+            return '<div class="row-item">' +
+              '<span class="row-icon">' + icon(isDir ? 'folder' : 'file', 18) + '</span>' +
+              '<div class="row-main"><div class="row-title" data-entry="' + esc(e.path) + '" data-type="' + e.type + '">' + esc(e.name) + '</div></div>' +
+              '<div class="row-side">' + (isDir ? '文件夹' : fmtSize(e.size)) +
+              (!isDir ? '<button class="btn sm danger-ghost" data-delfile="' + esc(e.path) + '" data-fsha="' + esc(e.sha) + '" data-fname="' + esc(e.name) + '">' + icon('trash') + '</button>' : '') +
+              '</div></div>';
+          }).join('') + '</div>'
+        : '<div class="empty">' + icon('folder', 40) + '<div class="big">这个目录是空的</div></div>'}
+    `;
+    $('#branch-sel').addEventListener('change', ev => { state.branch = ev.target.value; state.path = ''; state.file = null; loadContents(); });
+    $('#btn-newfile').addEventListener('click', openNewFile);
+    $('#btn-rf').addEventListener('click', loadContents);
+    $$('#repo-body [data-crumb]').forEach(c => c.addEventListener('click', () => { state.path = c.dataset.crumb; state.file = null; loadContents(); }));
+    $$('#repo-body [data-entry]').forEach(t => t.addEventListener('click', () => {
+      if (t.dataset.type === 'dir') { state.path = t.dataset.entry; state.file = null; loadContents(); }
+      else openFile(t.dataset.entry);
+    }));
+    $$('#repo-body [data-delfile]').forEach(b => b.addEventListener('click', () => {
+      confirmModal({
+        title: '删除文件',
+        body: '永久删除 <b style="font-family:var(--mono)">' + esc(b.dataset.delfile) + '</b>？将产生一条删除提交。',
+        required: 'DELETE',
+        okText: '确认删除',
+        onConfirm: async () => {
+          await api('DELETE', '/repos/' + state.repo.full_name + '/contents/' + encPath(b.dataset.delfile),
+            { message: '删除文件 ' + b.dataset.fname, sha: b.dataset.fsha, branch: state.branch || state.repo.default_branch },
+            { fullName: state.repo.full_name });
+          toast('文件已删除');
+          loadContents();
+        },
+      });
+    }));
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4：旧请求失败不得覆盖当前视图
+    body.innerHTML = '<div class="card" style="border-color:var(--danger)"><b>加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+
+async function openFile(path){
+  const gen = ++state.reqGen; // C-2：读文件是异步，切 tab/切仓库后旧响应不得覆盖当前视图
+  const body = $('#repo-body');
+  body.innerHTML = '<div class="loading"><div class="spinner"></div>正在读取文件 ...</div>';
+  try {
+    const branch = state.branch || state.repo.default_branch;
+    const f = await api('GET', '/repos/' + state.repo.full_name + '/contents/' + encPath(path) + '?ref=' + encodeURIComponent(branch), undefined, { fullName: state.repo.full_name });
+    if (gen !== state.reqGen) return; // 旧响应：静默退出，不写 state.file、不覆盖 #repo-body
+    state.file = f;
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    const isImage = IMG_EXT.includes(ext);
+    const tooBig = f.size > 1000000;
+    let canEdit = true; // 二进制/图片/超大文件禁止进文本编辑器（base64 往返不可逆，保存即损坏）
+    let inner;
+    if (tooBig) { inner = '<div class="empty">' + icon('file', 40) + '<div class="big">文件超过 1MB，不直接预览</div></div>'; canEdit = false; }
+    else if (isImage) { inner = '<img class="img-view" src="data:image/' + (ext === 'svg' ? 'svg+xml' : ext) + ';base64,' + f.content.replace(/\s/g, '') + '" alt="">'; canEdit = false; }
+    else if (f.encoding === 'base64') {
+      const raw = atob(f.content.replace(/\s/g, ''));
+      let binary = false;
+      for (let i = 0; i < Math.min(raw.length, 1024); i++) if (raw.charCodeAt(i) === 0) { binary = true; break; }
+      if (binary) { inner = '<div class="empty">' + icon('file', 40) + '<div class="big">二进制文件，不直接预览</div><div>可在网页端或下载后查看</div></div>'; canEdit = false; }
+      else inner = '<pre class="code">' + esc(b64ToUtf8(f.content)) + '</pre>';
+    } else inner = '<pre class="code">' + esc(f.content || '') + '</pre>';
+    body.innerHTML = `
+      <div class="file-head">
+        <button class="btn sm" onclick="loadContents()">${icon('back')} 返回目录</button>
+        <span class="file-name">${esc(f.name)}</span>
+        <span style="color:var(--muted);font-size:12.5px">${fmtSize(f.size)}</span>
+        ${canEdit ? '<button class="btn sm primary" id="btn-editfile">' + icon('edit') + ' 编辑</button>' : ''}
+        ${f.html_url ? '<a class="btn sm" href="' + esc(f.html_url) + '" target="_blank">' + icon('ext') + ' 网页</a>' : ''}
+        ${f.download_url ? '<a class="btn sm" id="btn-download" href="' + esc(f.download_url) + '">' + icon('download') + ' 下载</a>' : ''}
+      </div>
+      ${inner}
+    `;
+    const eb = $('#btn-editfile');
+    if (eb) eb.addEventListener('click', () => openFileEditor(f));
+    const dl = $('#btn-download');
+    if (dl) dl.addEventListener('click', (e) => {
+      // 跨域 <a download> 的 download 属性会被浏览器忽略 → 退化成同标签页导航 → 被 desktop.cjs 的 will-navigate 拦掉（点了没反应）。
+      // 改走主进程桥接：主进程先弹「另存为」对话框（取消则不发请求），确认后 downloadURL 落盘，等下载真正结束再回结果，
+      // 故此处按真实结果如实提示（已保存到 <路径> / 用户取消 / 下载失败），不再无条件报成功。
+      e.preventDefault();
+      const label = dl.innerHTML;
+      dl.classList.add('disabled'); dl.style.pointerEvents = 'none';
+      dl.innerHTML = icon('download') + ' 下载中…';
+      fetch(bridgeURL('download', '&url=' + encodeURIComponent(dl.getAttribute('href'))))
+        .then(r => r.json())
+        .then(d => {
+          if (d && d.ok) toast('已保存到 ' + (d.path || '所选位置'));
+          else if (d && d.canceled) { /* 用户取消另存为：不报错 */ }
+          else toast('下载失败' + (d && d.error ? '：' + d.error : ''), 'err');
+        })
+        .catch(() => toast('下载失败：无法连接本地服务', 'err'))
+        .finally(() => { dl.innerHTML = label; dl.classList.remove('disabled'); dl.style.pointerEvents = ''; });
+    });
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4：旧请求失败不得覆盖当前视图
+    body.innerHTML = '<div class="card" style="border-color:var(--danger)"><b>读取失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+
+function fileEditorModal(title, path, content, sha){
+  openModal(`
+    <div class="m-title">${esc(title)}</div>
+    <div class="m-field"><label class="field-label">文件路径（如 src/main.py）</label>
+      <input class="m-input" id="fe-path" style="font-family:var(--mono)" value="${esc(path)}" ${sha ? 'readonly style="font-family:var(--mono);opacity:.7"' : ''}></div>
+    <div class="m-field"><label class="field-label">文件内容</label>
+      <textarea class="m-textarea" id="fe-content" style="min-height:220px">${esc(content)}</textarea></div>
+    <div class="m-field"><label class="field-label">提交信息（Commit message）</label>
+      <input class="m-input" id="fe-msg" placeholder="例如：更新配置 / fix typo"></div>
+    <div class="m-actions">
+      <button class="btn" id="fe-cancel">取消</button>
+      <button class="btn primary" id="fe-ok">${icon('check')} 提交</button>
+    </div>
+  `);
+  $('#fe-cancel').addEventListener('click', closeModal);
+  $('#fe-content').focus();
+  $('#fe-ok').addEventListener('click', async () => {
+    const __ok = $('#fe-ok'); if (__ok.disabled) return;
+    const p = $('#fe-path').value.trim().replace(/^\/+/, '');
+    const content = $('#fe-content').value;
+    const msg = $('#fe-msg').value.trim() || ('更新 ' + p);
+    if (!p) { toast('请填写文件路径', 'err'); return; }
+    __ok.disabled = true;
+    try {
+      const payload = { message: msg, content: utf8ToB64(content), branch: state.branch || state.repo.default_branch };
+      if (sha) payload.sha = sha;
+      if (activeAccount() && activeAccount().platform === 'gitlab') payload.encoding = 'base64';
+      await api('PUT', '/repos/' + state.repo.full_name + '/contents/' + encPath(p), payload, { fullName: state.repo.full_name });
+      toast('已提交到 ' + (state.branch || state.repo.default_branch) + ' 分支');
+      closeModal();
+      state.path = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+      loadContents();
+    } catch (e) { __ok.disabled = false; toast('提交失败：' + e.message, 'err'); }
+  });
+}
+function openFileEditor(f){
+  const content = f.encoding === 'base64' ? b64ToUtf8(f.content) : (f.content || '');
+  fileEditorModal('编辑文件', f.path, content, f.sha);
+}
+function openNewFile(){
+  const base = state.path ? state.path + '/' : '';
+  fileEditorModal('新建文件', base, '', null);
+}
+
+/* ================= Commits ================= */
+async function loadCommits(){
+  const gen = ++state.reqGen;
+  const body = $('#repo-body');
+  body.innerHTML = '<div class="loading"><div class="spinner"></div>正在加载提交历史 ...</div>';
+  try {
+    const branch = state.branch || state.repo.default_branch;
+    const list = await api('GET', '/repos/' + state.repo.full_name + '/commits?sha=' + encodeURIComponent(branch) + '&per_page=30', undefined, { fullName: state.repo.full_name });
+    if (gen !== state.reqGen) return;
+    body.innerHTML = `
+      <div class="toolbar"><span style="color:var(--muted);font-size:13px">分支 <b>${esc(branch)}</b> 的最近提交，点击可在浏览器查看完整改动</span></div>
+      ${list.length
+        ? '<div class="row-list">' + list.map(c => `
+          <a class="row-item" href="${esc(c.html_url)}" target="_blank" style="text-decoration:none;color:inherit">
+            <span class="row-icon">${icon('commit', 18)}</span>
+            <div class="row-main">
+              <div class="row-title plain" style="cursor:default">${esc((c.commit.message || '').split('\n')[0])}</div>
+              <div class="row-sub"><span style="font-family:var(--mono)">${esc((c.sha || '').slice(0, 7))}</span> · ${esc(c.commit.author ? c.commit.author.name : '')} · ${timeAgo(c.commit.author ? c.commit.author.date : '')}</div>
+            </div>
+            <div class="row-side">${icon('ext')}</div>
+          </a>`).join('') + '</div>'
+        : '<div class="empty">' + icon('commit', 40) + '<div class="big">没有提交记录</div></div>'}
+    `;
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4：旧请求失败不得覆盖当前视图
+    body.innerHTML = '<div class="card" style="border-color:var(--danger)"><b>加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+
+/* ================= 分支 ================= */
+async function loadBranches(){
+  const gen = ++state.reqGen;
+  const body = $('#repo-body');
+  body.innerHTML = '<div class="loading"><div class="spinner"></div>正在加载分支 ...</div>';
+  try {
+    const branches = await api('GET', '/repos/' + state.repo.full_name + '/branches?per_page=100', undefined, { fullName: state.repo.full_name });
+    if (gen !== state.reqGen) return; // 赋值必须在守卫之后：否则切号/切仓库时旧响应会污染 state.branches
+    state.branches = branches;
+    body.innerHTML = `
+      <div class="toolbar">
+        <button class="btn primary sm" id="btn-newbranch">${icon('plus')} 新建分支</button>
+        <span style="color:var(--muted);font-size:13px">默认分支不可删除</span>
+      </div>
+      <div class="row-list">
+        ${state.branches.map(b => {
+          const isDef = b.name === state.repo.default_branch;
+          return '<div class="row-item">' +
+            '<span class="row-icon">' + icon('branch', 18) + '</span>' +
+            '<div class="row-main"><div class="row-title plain" style="cursor:default">' + esc(b.name) + '</div>' +
+            '<div class="row-sub">最新提交 <span style="font-family:var(--mono)">' + esc((b.commit && b.commit.sha || '').slice(0, 7)) + '</span></div></div>' +
+            '<div class="row-side">' + (isDef ? '<span class="badge def">默认</span>' : '<button class="btn sm danger-ghost" data-delbranch="' + esc(b.name) + '">删除</button>') + '</div></div>';
+        }).join('')}
+      </div>
+    `;
+    $('#btn-newbranch').addEventListener('click', openNewBranch);
+    $$('#repo-body [data-delbranch]').forEach(btn => btn.addEventListener('click', () => deleteBranch(btn.dataset.delbranch)));
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4：旧请求失败不得覆盖当前视图
+    body.innerHTML = '<div class="card" style="border-color:var(--danger)"><b>加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+function openNewBranch(){
+  const def = state.branches.find(b => b.name === state.repo.default_branch);
+  const defSha = def ? def.commit.sha : '';
+  openModal(`
+    <div class="m-title">新建分支</div>
+    <div class="m-field"><label class="field-label">分支名（如 dev / feature-x）</label>
+      <input class="m-input" id="nb-name" style="font-family:var(--mono)" placeholder="不能包含空格和 ~ ^ : ? * [ \\" autocomplete="off"></div>
+    <p class="m-text">将基于默认分支 <b>${esc(state.repo.default_branch)}</b> 创建</p>
+    <div class="m-actions">
+      <button class="btn" id="nb-cancel">取消</button>
+      <button class="btn primary" id="nb-ok">${icon('plus')} 创建</button>
+    </div>
+  `);
+  $('#nb-cancel').addEventListener('click', closeModal);
+  $('#nb-name').focus();
+  $('#nb-ok').addEventListener('click', async () => {
+    const __ok = $('#nb-ok'); if (__ok.disabled) return;
+    const name = $('#nb-name').value.trim();
+    if (!name) { toast('请填写分支名', 'err'); return; }
+    __ok.disabled = true;
+    try {
+      await api('POST', '/repos/' + state.repo.full_name + '/git/refs', { ref: 'refs/heads/' + name, sha: defSha }, { fullName: state.repo.full_name });
+      toast('分支 ' + name + ' 已创建');
+      closeModal();
+      loadBranches();
+    } catch (e) { __ok.disabled = false; toast('创建失败：' + e.message, 'err'); }
+  });
+}
+function deleteBranch(name){
+  if (name === state.repo.default_branch) { toast('默认分支不能删除', 'err'); return; }
+  confirmModal({
+    title: '删除分支',
+    body: '即将删除分支 <b style="font-family:var(--mono)">' + esc(name) + '</b>，该分支上未合并的提交将丢失。',
+    required: name,
+    okText: '确认删除',
+    onConfirm: async () => {
+      await api('DELETE', '/repos/' + state.repo.full_name + '/git/refs/heads/' + encodeURIComponent(name), undefined, { fullName: state.repo.full_name });
+      toast('分支已删除');
+      loadBranches();
+    },
+  });
+}
+
+/* ================= Issues ================= */
+async function loadIssues(){
+  const gen = ++state.reqGen;
+  const body = $('#repo-body');
+  body.innerHTML = '<div class="loading"><div class="spinner"></div>正在加载 Issues ...</div>';
+  try {
+    const all = await api('GET', '/repos/' + state.repo.full_name + '/issues?state=' + state.issueFilter + '&per_page=100&sort=created&direction=desc', undefined, { fullName: state.repo.full_name });
+    if (gen !== state.reqGen) return;
+    state.issues = all.filter(x => !x.pull_request);
+    body.innerHTML = `
+      <div class="toolbar">
+        <div class="chips">
+          ${[['open','开启'],['closed','已关闭'],['all','全部']].map(([k, l]) =>
+            '<button class="chip ' + (state.issueFilter === k ? 'active' : '') + '" data-ifilter="' + k + '">' + l + '</button>').join('')}
+        </div>
+        <button class="btn primary sm" style="margin-left:auto" onclick="openNewIssue()">${icon('plus')} 新建 Issue</button>
+      </div>
+      ${state.issues.length
+        ? '<div class="row-list">' + state.issues.map(x => {
+            const open = x.state === 'open';
+            const labels = (x.labels || []).map(l =>
+              '<span class="label-pill" style="background:#' + (/^[0-9a-fA-F]{6}$/.test(l.color || '') ? l.color : '6d8cff') + ';color:#1f2937">' + esc(l.name) + '</span>').join(' ');
+            return '<div class="row-item">' +
+              '<span class="row-icon">' + icon('issue', 18) + '</span>' +
+              '<div class="row-main"><div class="row-title plain" style="cursor:default">#' + x.number + ' ' + esc(x.title) + '</div>' +
+              '<div class="row-sub">' + esc(x.user ? x.user.login : '') + ' 创建于 ' + timeAgo(x.created_at) +
+              (x.comments ? ' · ' + x.comments + ' 条评论' : '') + (labels ? ' · ' + labels : '') + '</div></div>' +
+              '<div class="row-side"><span class="badge ' + (open ? 'open' : 'closed') + '">' + (open ? '开启' : '已关闭') + '</span>' +
+              '<button class="btn sm" data-icomment="' + x.number + '">' + icon('comment') + '</button>' +
+              '<button class="btn sm" data-itoggle="' + x.number + '" data-inow="' + x.state + '">' + (open ? '关闭' : '重开') + '</button>' +
+              '<a class="btn sm" href="' + esc(x.html_url) + '" target="_blank">' + icon('ext') + '</a></div></div>';
+          }).join('') + '</div>'
+        : '<div class="empty">' + icon('issue', 40) + '<div class="big">没有 Issue</div></div>'}
+    `;
+    $$('#repo-body [data-ifilter]').forEach(c => c.addEventListener('click', () => { state.issueFilter = c.dataset.ifilter; loadIssues(); }));
+    $$('#repo-body [data-itoggle]').forEach(b => b.addEventListener('click', () => toggleIssue(Number(b.dataset.itoggle), b.dataset.inow === 'open' ? 'closed' : 'open')));
+    $$('#repo-body [data-icomment]').forEach(b => b.addEventListener('click', () => openIssueComment(Number(b.dataset.icomment))));
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4：旧请求失败不得覆盖当前视图
+    body.innerHTML = '<div class="card" style="border-color:var(--danger)"><b>加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+async function toggleIssue(num, newState){
+  try {
+    await api('PATCH', '/repos/' + state.repo.full_name + '/issues/' + num, { state: newState }, { fullName: state.repo.full_name });
+    toast('Issue #' + num + ' 已' + (newState === 'open' ? '重新打开' : '关闭'));
+    loadIssues();
+  } catch (e) { toast('操作失败：' + e.message, 'err'); }
+}
+function openIssueComment(num){
+  openModal(`
+    <div class="m-title">评论 Issue #${num}</div>
+    <div class="m-field"><textarea class="m-textarea" id="ic-body" style="min-height:150px" placeholder="支持 Markdown"></textarea></div>
+    <div class="m-actions">
+      <button class="btn" id="ic-cancel">取消</button>
+      <button class="btn primary" id="ic-ok">${icon('comment')} 发表评论</button>
+    </div>
+  `);
+  $('#ic-cancel').addEventListener('click', closeModal);
+  $('#ic-body').focus();
+  $('#ic-ok').addEventListener('click', async () => {
+    const __ok = $('#ic-ok'); if (__ok.disabled) return;
+    const body = $('#ic-body').value.trim();
+    if (!body) { toast('评论不能为空', 'err'); return; }
+    __ok.disabled = true;
+    try {
+      await api('POST', '/repos/' + state.repo.full_name + '/issues/' + num + '/comments', { body }, { fullName: state.repo.full_name });
+      toast('评论已发表');
+      closeModal();
+    } catch (e) { __ok.disabled = false; toast('评论失败：' + e.message, 'err'); }
+  });
+}
+function openNewIssue(){
+  openModal(`
+    <div class="m-title">新建 Issue</div>
+    <div class="m-field"><label class="field-label">标题</label>
+      <input class="m-input" id="is-title" autocomplete="off"></div>
+    <div class="m-field"><label class="field-label">内容（可选，支持 Markdown）</label>
+      <textarea class="m-textarea" id="is-body"></textarea></div>
+    <div class="m-actions">
+      <button class="btn" id="is-cancel">取消</button>
+      <button class="btn primary" id="is-ok">${icon('plus')} 创建</button>
+    </div>
+  `);
+  $('#is-cancel').addEventListener('click', closeModal);
+  $('#is-title').focus();
+  $('#is-ok').addEventListener('click', async () => {
+    const __ok = $('#is-ok'); if (__ok.disabled) return;
+    const title = $('#is-title').value.trim();
+    if (!title) { toast('请填写标题', 'err'); return; }
+    __ok.disabled = true;
+    try {
+      await api('POST', '/repos/' + state.repo.full_name + '/issues', { title, body: $('#is-body').value }, { fullName: state.repo.full_name });
+      toast('Issue 创建成功');
+      closeModal();
+      state.issueFilter = 'open';
+      loadIssues();
+    } catch (e) { __ok.disabled = false; toast('创建失败：' + e.message, 'err'); }
+  });
+}
+
+/* ================= PR ================= */
+async function loadPulls(){
+  const gen = ++state.reqGen;
+  const body = $('#repo-body');
+  body.innerHTML = '<div class="loading"><div class="spinner"></div>正在加载 PR ...</div>';
+  try {
+    const list = await api('GET', '/repos/' + state.repo.full_name + '/pulls?state=all&per_page=50', undefined, { fullName: state.repo.full_name });
+    if (gen !== state.reqGen) return;
+    body.innerHTML = `
+      <div class="toolbar"><span style="color:var(--muted);font-size:13px">PR 的合并、Review 等操作请到网页进行，点击行可直达</span></div>
+      ${list.length
+        ? '<div class="row-list">' + list.map(x => {
+            const merged = x.merged === true || !!x.merged_at;
+            const open = !merged && x.state === 'open';
+            return '<a class="row-item" href="' + esc(x.html_url) + '" target="_blank" style="text-decoration:none;color:inherit">' +
+              '<span class="row-icon">' + icon('pr', 18) + '</span>' +
+              '<div class="row-main"><div class="row-title plain" style="cursor:default">#' + x.number + ' ' + esc(x.title) + '</div>' +
+              '<div class="row-sub">' + esc(x.user ? x.user.login : '') + ' · ' + esc((x.head && x.head.ref) || '') + ' → ' + esc((x.base && x.base.ref) || '') + ' · ' + timeAgo(x.updated_at) + '</div></div>' +
+              '<div class="row-side"><span class="badge ' + (merged ? 'merged' : open ? 'open' : 'closed') + '">' + (merged ? '已合并' : open ? '开启' : '已关闭') + '</span><button class="btn sm" data-prfiles="' + x.number + '" title="查看变更文件">变更</button></div></a>';
+          }).join('') + '</div>'
+        : '<div class="empty">' + icon('pr', 40) + '<div class="big">没有 PR</div></div>'}
+    `;
+    $$('#repo-body [data-prfiles]').forEach(b => b.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      openPrFiles(Number(b.dataset.prfiles));
+    }));
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4：旧请求失败不得覆盖当前视图
+    body.innerHTML = '<div class="card" style="border-color:var(--danger)"><b>加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+
+/* ================= PR 变更文件 ================= */
+async function openPrFiles(num){
+  const gen = ++state.reqGen; // R3-DEF4：写 #modal 的请求也必须递增代际——弹窗不像 #repo-body 会被 renderRepoDetail 重建，
+  // 若只捕获不递增，两连点「变更」时旧 PR 响应会覆盖用户最后点开的弹窗
+  try {
+    const files = await api('GET', '/repos/' + state.repo.full_name + '/pulls/' + num + '/files?per_page=100', undefined, { fullName: state.repo.full_name });
+    if (gen !== state.reqGen) return;
+    const rows = files.map(f => {
+      const stName = { added: '新增', removed: '删除', modified: '修改', renamed: '重命名' }[f.status] || (f.status || '');
+      const stCls = f.status === 'added' ? 'open' : f.status === 'removed' ? 'closed' : 'runrun';
+      const patchLines = f.patch ? f.patch.split('\n') : [];
+      const truncated = patchLines.length > 200;
+      const patchHtml = patchLines.length
+        ? '<div class="code" style="max-height:260px">' + esc(patchLines.slice(0, 200).join('\n')) + (truncated ? '\n... (差异过长，已截断)' : '') + '</div>'
+        : '<div style="color:var(--muted);font-size:12px">（无文本差异，可能是二进制文件）</div>';
+      return '<div style="margin:14px 0 6px;font-family:var(--mono);font-size:12px;font-weight:650">' + esc(f.filename || '') +
+        ' <span class="badge ' + stCls + '">' + stName + '</span></div>' + patchHtml;
+    }).join('');
+    openModal('<div class="m-title">PR #' + num + ' 变更文件（' + files.length + '）</div>' +
+      '<div style="max-height:64vh;overflow-y:auto">' + (rows || '<div class="empty">没有变更</div>') + '</div>' +
+      '<div class="m-actions"><button class="btn primary" onclick="closeModal()">关闭</button></div>');
+  } catch (e) {
+    toast('变更加载失败：' + e.message, 'err');
+  }
+}
+
+/* ================= Releases ================= */
+async function loadReleases(){
+  const gen = ++state.reqGen;
+  const body = $('#repo-body');
+  body.innerHTML = '<div class="loading"><div class="spinner"></div>正在加载 Releases ...</div>';
+  try {
+    const list = await api('GET', '/repos/' + state.repo.full_name + '/releases?per_page=30', undefined, { fullName: state.repo.full_name });
+    if (gen !== state.reqGen) return;
+    body.innerHTML = `
+      <div class="toolbar"><span style="color:var(--muted);font-size:13px">发布新 Release 请打 Tag 后到网页操作；这里可以删除不需要的 Release</span></div>
+      ${list.length
+        ? '<div class="row-list">' + list.map(x => {
+            const kind = x.draft ? '<span class="badge closed">草稿</span>' : x.prerelease ? '<span class="badge pri">预发布</span>' : '<span class="badge pub">正式</span>';
+            return '<div class="row-item">' +
+              '<span class="row-icon">' + icon('tag', 18) + '</span>' +
+              '<div class="row-main"><div class="row-title plain" style="cursor:default">' + esc(x.name || x.tag_name) + '</div>' +
+              '<div class="row-sub">Tag: <span style="font-family:var(--mono)">' + esc(x.tag_name) + '</span> · ' + esc(x.author ? x.author.login : '') + ' · ' + timeAgo(x.published_at) +
+              (x.assets && x.assets.length ? ' · ' + x.assets.length + ' 个附件' : '') + '</div></div>' +
+              '<div class="row-side">' + kind +
+              '<button class="btn sm danger-ghost" data-rdel="' + x.id + '" data-rtag="' + esc(x.tag_name) + '">' + icon('trash') + '</button>' +
+              '<a class="btn sm" href="' + esc(x.html_url) + '" target="_blank">' + icon('ext') + '</a></div></div>';
+          }).join('') + '</div>'
+        : '<div class="empty">' + icon('tag', 40) + '<div class="big">没有 Release</div></div>'}
+    `;
+    $$('#repo-body [data-rdel]').forEach(b => b.addEventListener('click', () => {
+      confirmModal({
+        title: '删除 Release',
+        body: '即将删除 Release <b style="font-family:var(--mono)">' + esc(b.dataset.rtag) + '</b>（不影响 Tag 本身和已上传的附件存档）。',
+        required: b.dataset.rtag,
+        okText: '确认删除',
+        onConfirm: async () => {
+          await api('DELETE', '/repos/' + state.repo.full_name + '/releases/' + b.dataset.rdel, undefined, { fullName: state.repo.full_name });
+          toast('Release 已删除');
+          loadReleases();
+        },
+      });
+    }));
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4：旧请求失败不得覆盖当前视图
+    body.innerHTML = '<div class="card" style="border-color:var(--danger)"><b>加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+
+/* ================= Actions ================= */
+function runBadge(run){
+  if (run.status !== 'completed')
+    return '<span class="badge runrun">' + esc(run.status === 'in_progress' ? '运行中' : run.status === 'queued' ? '排队中' : run.status) + '</span>';
+  const c = run.conclusion;
+  if (c === 'success') return '<span class="badge runok">成功</span>';
+  if (c === 'failure' || c === 'timed_out' || c === 'startup_failure') return '<span class="badge runbad">失败</span>';
+  if (c === 'cancelled') return '<span class="badge closed">已取消</span>';
+  return '<span class="badge closed">' + esc(c || '完成') + '</span>';
+}
+async function loadRuns(){
+  const body = $('#repo-body');
+  const gen = state.reqGen; // 代际守卫：快速切 tab/切仓库后晚到的响应不写回
+  body.innerHTML = '<div class="loading"><div class="spinner"></div>正在加载 Actions ...</div>';
+  try {
+    const res = await api('GET', '/repos/' + state.repo.full_name + '/actions/runs?per_page=20', undefined, { fullName: state.repo.full_name });
+    if (gen !== state.reqGen) return;
+    const list = res.workflow_runs || [];
+    body.innerHTML = `
+      <div class="toolbar"><span style="color:var(--muted);font-size:13px">最近 20 次 Workflow 运行，日志与重跑请到网页</span></div>
+      ${list.length
+        ? '<div class="row-list">' + list.map(x => `
+          <a class="row-item" href="${esc(x.html_url)}" target="_blank" style="text-decoration:none;color:inherit">
+            <span class="row-icon">${icon('zap', 18)}</span>
+            <div class="row-main">
+              <div class="row-title plain" style="cursor:default">${esc(x.display_title || x.name || '')}</div>
+              <div class="row-sub">${esc(x.name || '')} · #${x.run_number} · ${esc(x.event)} · ${esc(x.head_branch || '')} · ${timeAgo(x.created_at)}</div>
+            </div>
+            <div class="row-side">${runBadge(x)}</div>
+          </a>`).join('') + '</div>'
+        : '<div class="empty">' + icon('zap', 40) + '<div class="big">这个仓库没有配置 Actions 工作流</div></div>'}
+    `;
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4：旧请求失败不得覆盖当前视图
+    body.innerHTML = '<div class="card" style="border-color:var(--danger)"><b>加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+
+/* ================= 仓库设置 ================= */
+function renderRepoSettings(){
+  const r = state.repo;
+  const body = $('#repo-body');
+  body.innerHTML = `
+    <div class="card" style="margin-bottom:15px">
+      <div class="m-title">基本信息</div>
+      <div class="form-row">
+        <div class="m-field"><label class="field-label">仓库名称</label>
+          <input class="m-input" id="rs-name" value="${esc(r.name)}" style="font-family:var(--mono)"></div>
+        <button class="btn primary" id="rs-name-save">${icon('check')} 保存</button>
+      </div>
+      <div class="form-row">
+        <div class="m-field"><label class="field-label">描述</label>
+          <input class="m-input" id="rs-desc" value="${esc(r.description || '')}"></div>
+        <button class="btn primary" id="rs-desc-save">${icon('check')} 保存</button>
+      </div>
+      <div class="form-row">
+        <div class="m-field"><label class="field-label">默认分支</label>
+          <select class="m-input" id="rs-db" style="padding:10px 14px">
+            ${state.branches.map(b => '<option value="' + esc(b.name) + '" ' + (b.name === r.default_branch ? 'selected' : '') + '>' + esc(b.name) + '</option>').join('')}
+          </select></div>
+        <button class="btn primary" id="rs-db-save">${icon('check')} 保存</button>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:15px">
+      <div class="m-title">可见性</div>
+      <div class="radio-row" style="margin-bottom:10px">
+        <label><input type="radio" name="rs-vis" value="private" ${r.private ? 'checked' : ''}> 私有</label>
+        <label><input type="radio" name="rs-vis" value="public" ${!r.private ? 'checked' : ''}> 公开</label>
+      </div>
+      <button class="btn" id="rs-vis-save">${icon('check')} 应用可见性</button>
+    </div>
+    <div class="card" style="margin-bottom:15px">
+      <div class="m-title">仓库操作</div>
+      <div class="page-actions">
+        <button class="btn" id="rs-archive">${icon('archive')} ${r.archived ? '取消归档' : '归档仓库'}</button>
+        <button class="btn" id="rs-fork">${icon('fork')} Fork 到自己账号</button>
+        <button class="btn" id="rs-star2">${icon(isStarred() ? 'starFill' : 'star')} ${isStarred() ? '取消收藏' : '收藏'}</button>
+      </div>
+    </div>
+    <div class="card" style="border-color:var(--danger)">
+      <div class="m-title danger">危险区</div>
+      <p class="m-text">删除仓库将永久移除全部代码、Issue、PR、Release 和 Wiki，不可恢复。</p>
+      <button class="btn danger" id="rs-delete">${icon('trash')} 删除此仓库</button>
+    </div>
+  `;
+  $('#rs-name-save').addEventListener('click', () => patchRepo({ name: $('#rs-name').value.trim() }, '名称已更新'));
+  $('#rs-desc-save').addEventListener('click', () => patchRepo({ description: $('#rs-desc').value.trim() }, '描述已更新'));
+  $('#rs-db-save').addEventListener('click', () => patchRepo({ default_branch: $('#rs-db').value }, '默认分支已更新'));
+  $('#rs-vis-save').addEventListener('click', () => {
+    const priv = document.querySelector('[name=rs-vis]:checked').value === 'private';
+    confirmModal({
+      title: '修改可见性',
+      body: priv ? '即将把仓库设为<b>私有</b>。' : '即将把仓库设为<b>公开</b>，任何人都能看到仓库内容！',
+      required: state.repo.name,
+      okText: '确认修改',
+      onConfirm: () => patchRepo({ private: priv }, '可见性已更新'),
+    });
+  });
+  $('#rs-archive').addEventListener('click', () => patchRepo({ archived: !r.archived }, r.archived ? '已取消归档' : '已归档（变为只读）'));
+  $('#rs-fork').addEventListener('click', forkRepo);
+  $('#rs-star2').addEventListener('click', starToggle);
+  $('#rs-delete').addEventListener('click', () => deleteModal([state.repo], () => {
+    state.reposLoaded = false;
+    loadRepos();
+    showView('repos');
+  }));
+}
+async function patchRepo(fields, okMsg){
+  const gen = state.reqGen;              // 代际守卫：在途切仓库/切号后旧响应不得覆盖当前仓库
+  const full = state.repo.full_name;     // 捕获调用时的仓库，避免 await 后读实时 state.repo
+  try {
+    const updated = await api('PATCH', '/repos/' + full, fields, { fullName: full });
+    if (gen !== state.reqGen) return;    // 已切仓库/切号，丢弃旧响应
+    state.repo = updated;
+    toast(okMsg);
+    state.reposLoaded = false;
+    loadRepos();
+    renderRepoDetail();
+    ({ files: loadContents, commits: loadCommits, branches: loadBranches,
+       issues: loadIssues, pulls: loadPulls, releases: loadReleases,
+       actions: loadRuns, settings: renderRepoSettings }[state.tab] || (() => {}))();
+  } catch (e) { toast('保存失败：' + e.message, 'err'); }
+}
+
+/* ---------------- 关闭询问 ---------------- */
+// 点窗口 × 时由主进程 desktop.cjs 通过 webContents.executeJavaScript 调用 window.showCloseAsk()（本项目为 Electron，无 Python 侧）
+function showCloseAsk(){
+  openModal(`
+    <div class="m-title">关闭 Git 控制台</div>
+    <p class="m-text">要退出程序，还是最小化到系统托盘继续在后台运行？后台时点击托盘的小猫图标即可随时唤回。</p>
+    <label class="m-check" style="margin-bottom:4px"><input type="checkbox" id="ca-remember"> 记住我的选择，以后点 × 不再询问（可在「设置」页改回）</label>
+    <div class="m-actions" style="justify-content:space-between">
+      <button class="btn primary" id="ca-tray">${icon('moon')} 最小化到后台</button>
+      <button class="btn danger" id="ca-exit">${icon('logout')} 退出程序</button>
+    </div>
+  `);
+  $('#ca-tray').addEventListener('click', () => {
+    const remember = $('#ca-remember').checked ? '&remember=1' : '';
+    closeModal();
+    fetch(bridgeURL('minimize', remember)).catch(() => {});
+  });
+  $('#ca-exit').addEventListener('click', () => {
+    const remember = $('#ca-remember').checked ? '&remember=1' : '';
+    closeModal();
+    fetch(bridgeURL('exit', remember)).catch(() => {});
+  });
+  return false;
+}
+window.showCloseAsk = showCloseAsk;
+
+/* ---------------- 拖拽上传 ---------------- */
+function bytesToB64(bytes) {
+  let bin = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH)
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  return btoa(bin);
+}
+async function fileToB64(file) {
+  const buf = await file.arrayBuffer();
+  return bytesToB64(new Uint8Array(buf));
+}
+const DROP_LIMIT = 60; // 单次拖拽上传上限，避免平台限流
+async function collectDropped(items) {
+  const out = [];
+  let truncated = false; // 触顶且仍有未收集条目时置真——用于向用户明确提示，不静默丢弃
+  // 显式 FIFO 队列迭代遍历，替代递归下降：目录嵌套再深也不会压爆调用栈（修复 RangeError 栈溢出隐患）。
+  const queue = [];
+  for (const it of items) {
+    const e = it.webkitGetAsEntry && it.webkitGetAsEntry();
+    if (e) queue.push({ entry: e, prefix: '' });
+  }
+  for (let head = 0; head < queue.length; head++) {
+    if (out.length >= DROP_LIMIT) { truncated = true; break; }
+    const { entry, prefix } = queue[head];
+    if (entry.isFile) {
+      await new Promise(res => entry.file(f => {
+        if (out.length < DROP_LIMIT) out.push({ file: f, path: prefix + f.name });
+        res();
+      }, () => res()));
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const readBatch = () => new Promise(res => reader.readEntries(res, () => res()));
+      let batch;
+      do {
+        batch = await readBatch();
+        for (const child of batch) queue.push({ entry: child, prefix: prefix + entry.name + '/' });
+      } while (batch.length);
+    }
+  }
+  if (!out.length) {
+    for (const it of items) {
+      if (out.length >= DROP_LIMIT) { truncated = true; break; }
+      const f = it.getAsFile && it.getAsFile();
+      if (f) out.push({ file: f, path: f.name });
+    }
+  }
+  return { files: out, truncated };
+}
+async function uploadOne(repoFull, path, file, branch, overwrite) {
+  const b64 = await fileToB64(file);
+  const payload = { message: '上传 ' + path, content: b64, branch: branch };
+  if (activeAccount() && activeAccount().platform === 'gitlab') payload.encoding = 'base64';
+  try {
+    await api('PUT', '/repos/' + repoFull + '/contents/' + encPath(path), payload, { fullName: repoFull }); // 新建由适配层同构改写为 POST
+    return { ok: true, created: true };
+  } catch (e) {
+    // 勾选「覆盖」时：首次创建失败（同名文件已存在）→ 取出云端 sha 后再以「更新」方式重试。
+    // 各平台「已存在」状态码不一致（GitHub 422 / GitLab 400 / GitCode 409 …），故不再只认 422，
+    // 改为凭「能否取到 sha」判断是否确有同名文件：取到才重试，取不到则回抛原始错误（不掩盖真实失败）。
+    if (overwrite) {
+      let ex = null;
+      try { ex = await api('GET', '/repos/' + repoFull + '/contents/' + encPath(path) + '?ref=' + encodeURIComponent(branch), undefined, { fullName: repoFull }); }
+      catch (e2) { ex = null; }
+      if (ex && ex.sha) {
+        payload.sha = ex.sha;
+        await api('PUT', '/repos/' + repoFull + '/contents/' + encPath(path), payload, { fullName: repoFull });
+        return { ok: true, updated: true };
+      }
+    }
+    throw e;
+  }
+}
+function openUploadModal(files, truncated) {
+  const branch = state.branch || state.repo.default_branch;
+  const rows = files.map((f, i) =>
+    '<div data-upi="' + i + '">' + esc(f.path) + ' <span style="color:var(--subtle)">(' + Math.ceil(f.file.size / 1024) + ' KB)</span></div>').join('');
+  openModal(`
+    <div class="m-title">上传到 ${esc(state.repo.full_name)}</div>
+    <p class="m-text">目标目录：${esc(state.path || '(根目录)')} · 分支 ${esc(branch)} · 共 ${files.length} 个文件${truncated ? '（已截断：拖入条目过多，仅保留前 ' + DROP_LIMIT + ' 个）' : ''}</p>
+    <div class="m-list" style="max-height:220px">${rows}</div>
+    <label class="m-check"><input type="checkbox" id="up-overwrite"> 覆盖云端同名文件（不勾选时，云端同名文件会上传失败并标红）</label>
+    <div class="m-actions">
+      <button class="btn" id="up-cancel">取消</button>
+      <button class="btn primary" id="up-ok">开始上传</button>
+    </div>
+    <div id="up-prog" class="m-progress hidden"></div>
+  `);
+  let upFinished = false;
+  $('#up-cancel').addEventListener('click', closeModal);
+  $('#up-ok').addEventListener('click', async () => {
+    const __ok = $('#up-ok');
+    if (upFinished) { closeModal(); state.file = null; loadContents(); return; }
+    if (__ok.disabled) return; __ok.disabled = true;
+    const overwrite = $('#up-overwrite').checked;
+    const prog = $('#up-prog');
+    $('#up-cancel').disabled = true;
+    prog.classList.remove('hidden');
+    const lines = [];
+    let okN = 0;
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      if (f.file.size > 25 * 1024 * 1024) {
+        lines.push('<div class="faill">✗ ' + esc(f.path) + ' — 超过 25MB，跳过</div>');
+        prog.innerHTML = lines.join('');
+        continue;
+      }
+      try {
+        const r = await uploadOne(state.repo.full_name, (state.path ? state.path + '/' : '') + f.path, f.file, branch, overwrite);
+        okN++;
+        lines.push('<div class="okl">✓ ' + esc(f.path) + (r.updated ? '（覆盖）' : '') + '</div>');
+      } catch (e) {
+        lines.push('<div class="faill">✗ ' + esc(f.path) + ' — ' + esc(e.message) + '</div>');
+      }
+      prog.innerHTML = lines.join('');
+    }
+    lines.push('<div class="okl">完成：成功 ' + okN + ' / ' + files.length + '</div>');
+    prog.innerHTML = lines.join('');
+    upFinished = true;
+    $('#up-ok').textContent = '完成';
+    $('#up-ok').disabled = false;
+    toast('上传完成：' + okN + ' / ' + files.length);
+  });
+}
+let __dragDepth = 0;
+document.addEventListener('dragenter', (e) => {
+  if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+    __dragDepth++;
+    const ov = $('#drop-overlay');
+    if (ov) {
+      ov.querySelector('.dv').textContent =
+        (currentView === 'repo' && state.repo && state.tab === 'files')
+          ? '松手上传到 ' + state.repo.full_name + (state.path ? ' / ' + state.path : '')
+          : '松手查看上传选项';
+      ov.classList.add('on');
+    }
+  }
+});
+document.addEventListener('dragleave', () => {
+  __dragDepth = Math.max(0, __dragDepth - 1);
+  if (!__dragDepth) { const ov = $('#drop-overlay'); if (ov) ov.classList.remove('on'); }
+});
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  __dragDepth = 0;
+  const ov = $('#drop-overlay'); if (ov) ov.classList.remove('on');
+  if (!e.dataTransfer) return;
+  const { files, truncated } = await collectDropped(Array.from(e.dataTransfer.items || []));
+  if (!files.length) return;
+  if (!(currentView === 'repo' && state.repo && state.tab === 'files')) {
+    toast('请先打开一个仓库的「文件」页，再拖拽上传', 'err');
+    return;
+  }
+  if (truncated) toast('拖入文件过多，为避免平台限流仅上传前 ' + files.length + ' 个', 'err');
+  openUploadModal(files, truncated);
+});
+
+/* ================= Ctrl+K 命令面板 ================= */
+function openPalette(){
+  const nav = [
+    ['总览', 'overview'], ['我的仓库', 'repos'], ['我的收藏', 'stars'],
+    ['通知', 'notifications'], ['搜索仓库', 'search'], ['代码片段', 'gists'], ['设置', 'settings'],
+  ];
+  const actions = [
+    ['切换明暗主题', () => toggleTheme()],
+    ['新建仓库', () => openCreateRepo()],
+    ['账号绑定管理', () => showView('settings')],
+  ];
+  const buildItems = (q) => {
+    q = (q || '').trim().toLowerCase();
+    const out = [];
+    if (q) {
+      state.repos.filter(r => r.full_name.toLowerCase().includes(q)).slice(0, 8)
+        .forEach(r => out.push(['打开仓库 ' + r.full_name, () => openRepo(r.full_name)]));
+    }
+    nav.concat(actions).forEach(c => { if (!q || c[0].toLowerCase().includes(q)) out.push(c); });
+    return out;
+  };
+  openModal(`
+    <div class="m-title">命令面板</div>
+    <input class="m-input" id="kp-input" placeholder="输入命令或仓库名过滤（Enter 执行第一条，Esc 关闭）" autocomplete="off">
+    <div class="m-list" id="kp-list" style="max-height:320px;margin-top:12px"></div>
+  `);
+  let current = [];
+  const renderList = (q) => {
+    current = buildItems(q);
+    $('#kp-list').innerHTML = current.length
+      ? current.map((c, i) => '<div class="acct" data-kpi="' + i + '">' + esc(c[0]) + '</div>').join('')
+      : '<div class="acct" style="color:var(--muted)">没有匹配项</div>';
+    $$('#kp-list .acct').forEach(el => el.addEventListener('click', () => {
+      closeModal();
+      current[Number(el.dataset.kpi)][1]();
+    }));
+  };
+  renderList('');
+  const inp = $('#kp-input');
+  inp.focus();
+  inp.addEventListener('input', () => renderList(inp.value));
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && current.length) { const c = current[0]; closeModal(); c[1](); }
+    if (e.key === 'Escape') closeModal();
+  });
+}
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+    e.preventDefault();
+    if (state.user) openPalette();
+  }
+});
+
+/* ---------------- 启动 ---------------- */
+state.theme = localStorage.getItem('ghc_theme') || 'light';
+applyTheme();
+loadAccounts().then(() => {
+  renderLoginPlatforms();
+  if (activeAccount()) enterShell();
+  else { $('#view-login').classList.remove('hidden'); loginPing(); }
+});
+</script>
+</body>
+</html>

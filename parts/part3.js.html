@@ -1,0 +1,467 @@
+<script>
+/* ---------------- 收藏 Stars ---------------- */
+async function loadStars(){
+  const gen = ++state.reqGen;
+  renderStarsLoading();
+  try {
+    const out = [];
+    for (let page = 1; page <= 5; page++) {
+      const batch = await api('GET', '/user/starred?per_page=100&page=' + page);
+      if (gen !== state.reqGen) return;
+      out.push(...batch);
+      if (batch.length < 100) break;
+    }
+    if (gen !== state.reqGen) return;
+    out.sort((a, b) => (b.stargazers_count || 0) - (a.stargazers_count || 0));
+    state.stars = out;
+    state.starsLoaded = true;
+    state.starredSet = new Set(out.map(r => r.full_name)); // 收藏状态回显数据源
+    renderStars();
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4：旧请求失败不得覆盖当前视图
+    $('#view-stars').innerHTML = '<div class="card" style="border-color:var(--danger)"><b>收藏加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+function renderStarsLoading(){
+  $('#view-stars').innerHTML = `
+    <div class="page-head"><div class="page-title">${icon('star')} 我的收藏</div></div>
+    ${skeletonGrid()}`;
+}
+function renderStars(){
+  const list = state.stars;
+  $('#view-stars').innerHTML = `
+    <div class="page-head">
+      <div class="page-title">${icon('star')} 我的收藏 <span class="cnt">${list.length} 个</span></div>
+      <div class="page-actions"><button class="btn" onclick="loadStars()">${icon('refresh')} 刷新</button></div>
+    </div>
+    ${list.length
+      ? '<div class="repo-grid">' + list.map(r => repoCard(r, 'stars')).join('') + '</div>'
+      : '<div class="card empty">' + icon('star', 40) + '<div class="big">还没有收藏任何仓库</div><div>在 GitHub 网页上点 Star 后会出现在这里</div></div>'}
+  `;
+  $$('#view-stars [data-open]').forEach(b => b.addEventListener('click', () => openRepo(b.dataset.open)));
+  $$('#view-stars [data-unstar]').forEach(b => b.addEventListener('click', async () => {
+    if (await doStar(b.dataset.unstar, false, b)) {
+      state.stars = state.stars.filter(r => r.full_name !== b.dataset.unstar);
+      renderStars();
+    }
+  }));
+}
+
+/* ---------------- 通知 ---------------- */
+const NOTIF_ICONS = { Issue:'issue', PullRequest:'pr', Release:'tag', CheckSuite:'zap', Discussion:'comment', Commit:'commit' };
+async function loadNotifications(){
+  const gen = ++state.reqGen;
+  renderNotificationsLoading();
+  try {
+    const list = await api('GET', '/notifications?per_page=50' + (state.notifAll ? '&all=true' : ''));
+    if (gen !== state.reqGen) return;
+    state.notifications = list;
+    state.notifLoaded = true;
+    state.notifCount = list.filter(x => x.unread).length;
+    renderNav();
+    renderNotifications();
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4
+    $('#view-notifications').innerHTML = '<div class="card" style="border-color:var(--danger)"><b>通知加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+function renderNotificationsLoading(){
+  $('#view-notifications').innerHTML = `
+    <div class="page-head"><div class="page-title">${icon('bell')} 通知</div></div>
+    <div class="row-list">${'<div class="skel" style="height:52px;border-radius:0"></div>'.repeat(5)}</div>`;
+}
+function renderNotifications(){
+  const list = state.notifications;
+  $('#view-notifications').innerHTML = `
+    <div class="page-head">
+      <div class="page-title">${icon('bell')} 通知 <span class="cnt">${list.length} 条</span></div>
+      <div class="page-actions">
+        <button class="btn" onclick="markAllRead()">${icon('check')} 全部标记已读</button>
+        <button class="btn" onclick="loadNotifications()">${icon('refresh')} 刷新</button>
+      </div>
+    </div>
+    <div class="toolbar">
+      <div class="chips">
+        <button class="chip ${!state.notifAll ? 'active' : ''}" data-nf="unread">未读</button>
+        <button class="chip ${state.notifAll ? 'active' : ''}" data-nf="all">全部</button>
+      </div>
+    </div>
+    ${list.length
+      ? '<div class="row-list">' + list.map(n => {
+          const ic = NOTIF_ICONS[n.subject.type] || 'bell';
+          return '<div class="row-item">' +
+            (n.unread ? '<span class="unread-dot"></span>' : '<span style="width:8px;flex:none"></span>') +
+            '<span class="row-icon">' + icon(ic, 18) + '</span>' +
+            '<div class="row-main"><div class="row-title ' + (n.unread ? '' : 'plain') + '" style="cursor:default">' + esc(n.subject.title) + '</div>' +
+            '<div class="row-sub">' + esc(n.repository.full_name) + ' · ' + esc(n.subject.type) + ' · ' + timeAgo(n.updated_at) + '</div></div>' +
+            '<div class="row-side">' +
+            (n.unread ? '<button class="btn sm" data-nread="' + n.id + '">标为已读</button>' : '') +
+            '<a class="btn sm" href="' + esc(n.subject.url ? n.subject.url.replace('api.github.com/repos', 'github.com') : '') + '" target="_blank">' + icon('ext') + '</a></div></div>';
+        }).join('') + '</div>'
+      : '<div class="card empty">' + icon('bell', 40) + '<div class="big">没有通知</div><div>世界清静了</div></div>'}
+  `;
+  $$('#view-notifications [data-nf]').forEach(c => c.addEventListener('click', () => {
+    state.notifAll = c.dataset.nf === 'all';
+    loadNotifications();
+  }));
+  $$('#view-notifications [data-nread]').forEach(b => b.addEventListener('click', async () => {
+    try {
+      await api('PATCH', '/notifications/threads/' + b.dataset.nread);
+      loadNotifications();
+    } catch (e) { toast('操作失败：' + e.message, 'err'); }
+  }));
+}
+async function markAllRead(){
+  try {
+    await api('PUT', '/notifications');
+    toast('已全部标记为已读');
+    loadNotifications();
+  } catch (e) { toast('操作失败：' + e.message, 'err'); }
+}
+
+/* ---------------- 全局搜索 ---------------- */
+function renderSearch(){
+  $('#view-search').innerHTML = `
+    <div class="page-head"><div class="page-title">${icon('search')} 全局搜索</div></div>
+    <div class="card">
+      <div class="form-row">
+        <div class="m-field">
+          <label class="field-label">搜索 GitHub 上的公开仓库</label>
+          <input class="m-input" id="gs-input" placeholder="例如：todo app / machine learning / 用户名/仓库名" style="font-family:var(--mono)"
+            value="${esc(state.searchQuery)}">
+        </div>
+        <button class="btn primary" id="gs-btn" style="height:42px">${icon('search')} 搜索</button>
+      </div>
+      <div style="font-size:12.5px;color:var(--muted)">支持 GitHub 搜索语法，如 <code style="font-family:var(--mono)">stars:>1000 language:python</code></div>
+    </div>
+    <div id="gs-results" style="margin-top:18px">
+      ${state.searchResults === null ? '' : (state.searching ? '<div class="loading"><div class="spinner"></div>搜索中 ...</div>' : renderSearchResults())}
+    </div>
+  `;
+  $('#gs-btn').addEventListener('click', doSearch);
+  $('#gs-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+  if (state.searchResults !== null && !state.searching) bindSearchResults();
+}
+function renderSearchResults(){
+  const items = state.searchResults || [];
+  return items.length
+    ? '<div class="page-head"><div class="page-title" style="font-size:16px">结果 <span class="cnt">' + items.length + ' 个</span></div></div>' +
+      '<div class="repo-grid">' + items.map(r => repoCard(r, 'search')).join('') + '</div>'
+    : '<div class="card empty">' + icon('search', 40) + '<div class="big">没有找到相关仓库</div></div>';
+}
+function bindSearchResults(){
+  $$('#gs-results [data-open]').forEach(b => b.addEventListener('click', () => openRepo(b.dataset.open)));
+  $$('#gs-results [data-star]').forEach(b => b.addEventListener('click', async () => {
+    if (await doStar(b.dataset.star, true, b)) renderSearchResults();
+  }));
+  $$('#gs-results [data-unstar]').forEach(b => b.addEventListener('click', async () => {
+    if (await doStar(b.dataset.unstar, false, b)) renderSearchResults();
+  }));
+}
+async function doSearch(){
+  const q = $('#gs-input').value.trim();
+  if (!q) { toast('请输入搜索内容', 'err'); return; }
+  const gen = state.reqGen; // 代际守卫：切号/登出后晚到的搜索结果不写回（否则搜索页出现上一个账号的结果）
+  state.searchQuery = q;
+  state.searching = true;
+  state.searchResults = [];
+  $('#gs-results').innerHTML = '<div class="loading"><div class="spinner"></div>搜索中 ...</div>';
+  try {
+    const res = await api('GET', '/search/repositories?q=' + encodeURIComponent(q) + '&per_page=24&sort=stars');
+    // 守卫拦截时也必须复位 searching：否则 state.searching 永久卡 true → renderSearch 一直显示「搜索中…」（QA-N1）
+    if (gen !== state.reqGen) { state.searching = false; return; }
+    state.searchResults = res.items || [];
+    state.searching = false;
+    $('#gs-results').innerHTML = renderSearchResults();
+    bindSearchResults();
+  } catch (e) {
+    if (gen !== state.reqGen) { state.searching = false; return; } // 同上：失败分支被守卫拦下也复位（QA-N1）
+    state.searching = false;
+    $('#gs-results').innerHTML = '<div class="card" style="border-color:var(--danger)"><b>搜索失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+
+/* ---------------- Gists ---------------- */
+function gistTitle(g){
+  if (g.description) return g.description;
+  const files = Object.keys(g.files || {});
+  return files.length ? files[0] : '(无标题)';
+}
+function gistFileCount(g){ return Object.keys(g.files || {}).length; }
+async function loadGists(){
+  const gen = ++state.reqGen;
+  $('#view-gists').innerHTML = `
+    <div class="page-head">
+      <div class="page-title">${icon('code')} 代码片段 <span class="cnt">${state.gists.length || ''}</span></div>
+      <div class="page-actions">
+        <button class="btn primary" onclick="openNewGist()">${icon('plus')} 新建 Gist</button>
+        <button class="btn" onclick="loadGists()">${icon('refresh')} 刷新</button>
+      </div>
+    </div>
+    <div class="loading"><div class="spinner"></div>正在加载 ...</div>`;
+  try {
+    const list = await api('GET', '/gists?per_page=50');
+    if (gen !== state.reqGen) return;
+    state.gists = list;
+    state.gistsLoaded = true;
+    $('#view-gists').innerHTML = `
+      <div class="page-head">
+        <div class="page-title">${icon('code')} 代码片段 <span class="cnt">${list.length} 个</span></div>
+        <div class="page-actions">
+          <button class="btn primary" onclick="openNewGist()">${icon('plus')} 新建 Gist</button>
+          <button class="btn" onclick="loadGists()">${icon('refresh')} 刷新</button>
+        </div>
+      </div>
+      ${list.length
+        ? '<div class="row-list">' + list.map(g => `
+          <div class="row-item">
+            <span class="row-icon">${icon('code', 18)}</span>
+            <div class="row-main">
+              <div class="row-title plain" style="cursor:default">${esc(gistTitle(g))}</div>
+              <div class="row-sub">${gistFileCount(g)} 个文件 · ${g.public ? '公开' : '秘密'} · ${timeAgo(g.updated_at)}</div>
+            </div>
+            <div class="row-side">
+              <button class="btn sm" data-gview="${g.id}">${icon('eye')} 查看</button>
+              <a class="btn sm" href="${esc(g.html_url)}" target="_blank">${icon('ext')}</a>
+              <button class="btn sm danger-ghost" data-gdel="${g.id}" data-gname="${esc(gistTitle(g))}">${icon('trash')}</button>
+            </div>
+          </div>`).join('') + '</div>'
+        : '<div class="card empty">' + icon('code', 40) + '<div class="big">还没有 Gist</div><div>Gist 适合存放小段代码、配置、笔记</div></div>'}
+    `;
+    $$('#view-gists [data-gview]').forEach(b => b.addEventListener('click', () => openGist(b.dataset.gview)));
+    $$('#view-gists [data-gdel]').forEach(b => b.addEventListener('click', () => {
+      confirmModal({
+        title: '删除 Gist',
+        body: '即将永久删除 Gist：<b>' + esc(b.dataset.gname) + '</b>',
+        required: 'DELETE',
+        okText: '确认删除',
+        onConfirm: async () => {
+          await api('DELETE', '/gists/' + b.dataset.gdel);
+          if (gen !== state.reqGen) return;
+          toast('Gist 已删除');
+          state.gists = state.gists.filter(g => g.id !== b.dataset.gdel);
+          loadGists();
+        },
+      });
+    }));
+  } catch (e) {
+    if (gen !== state.reqGen) return; // C-4
+    $('#view-gists').innerHTML = '<div class="card" style="border-color:var(--danger)"><b>Gist 加载失败</b><br><span style="color:var(--muted)">' + esc(e.message) + '</span></div>';
+  }
+}
+async function openGist(id){
+  try {
+    const g = await api('GET', '/gists/' + id);
+    const files = Object.values(g.files || {});
+    const body = files.map(f =>
+      '<div class="file-head" style="margin-top:14px"><span class="file-name">' + esc(f.filename) + '</span>' +
+      '<span style="color:var(--muted);font-size:12px">' + esc(f.language || '') + ' · ' + fmtSize(Math.round((f.size || 0) / 1024)) + '</span></div>' +
+      '<pre class="code">' + esc(f.content || '（内容过大，请到网页查看）') + '</pre>').join('');
+    openModal(`
+      <div class="m-title">${esc(gistTitle(g))}</div>
+      <p class="m-text">${g.public ? '公开' : '秘密'} · 更新于 ${timeAgo(g.updated_at)}</p>
+      <div style="max-height:52vh;overflow-y:auto">${body || '<div class="empty">无文件内容</div>'}</div>
+      <div class="m-actions">
+        <a class="btn" href="${esc(g.html_url)}" target="_blank">${icon('ext')} 在网页打开</a>
+        <button class="btn primary" onclick="closeModal()">关闭</button>
+      </div>
+    `);
+  } catch (e) { toast('读取失败：' + e.message, 'err'); }
+}
+function openNewGist(){
+  openModal(`
+    <div class="m-title">新建 Gist</div>
+    <div class="m-field"><label class="field-label">描述（可选）</label>
+      <input class="m-input" id="ng-desc" autocomplete="off"></div>
+    <div class="m-field"><label class="field-label">文件名（如 notes.md / main.py）</label>
+      <input class="m-input" id="ng-name" style="font-family:var(--mono)" autocomplete="off"></div>
+    <div class="m-field"><label class="field-label">内容</label>
+      <textarea class="m-textarea" id="ng-content" style="min-height:150px"></textarea></div>
+    <label class="m-check"><input type="checkbox" id="ng-public"> 公开（不勾选 = 秘密 Gist）</label>
+    <div class="m-actions">
+      <button class="btn" id="ng-cancel">取消</button>
+      <button class="btn primary" id="ng-ok">${icon('plus')} 创建</button>
+    </div>
+  `);
+  $('#ng-cancel').addEventListener('click', closeModal);
+  $('#ng-name').focus();
+  $('#ng-ok').addEventListener('click', async () => {
+    const __ok = $('#ng-ok'); if (__ok.disabled) return;
+    const name = $('#ng-name').value.trim();
+    const content = $('#ng-content').value;
+    if (!name) { toast('请填写文件名', 'err'); return; }
+    __ok.disabled = true;
+    try {
+      await api('POST', '/gists', {
+        description: $('#ng-desc').value.trim(),
+        public: $('#ng-public').checked,
+        files: { [name]: { content } },
+      });
+      toast('Gist 创建成功');
+      closeModal();
+      loadGists();
+    } catch (e) { __ok.disabled = false; toast('创建失败：' + e.message, 'err'); }
+  });
+}
+
+/* ---------------- 全局设置页 ---------------- */
+function renderSettings(){
+  const accountsRows = state.accounts.map((a, i) => {
+    const P = PLATFORMS[a.platform];
+    const active = i === state.activeIdx;
+    return '<div class="row-item">' +
+      '<span class="row-icon">' + icon('repo', 18) + '</span>' +
+      '<div class="row-main"><div class="row-title plain" style="cursor:default">' + esc(P.label) + '</div>' +
+      '<div class="row-sub">' + esc((a.label || '').split('·').pop().trim()) + '</div></div>' +
+      '<div class="row-side">' +
+      (active ? '<span class="badge def">当前</span>' : '<button class="btn sm" data-act="' + i + '">切换</button>') +
+      '<button class="btn sm danger-ghost" data-del="' + i + '" title="解绑">' + icon('trash') + '</button></div></div>';
+  }).join('');
+  $('#view-settings').innerHTML = `
+    <div class="page-head"><div class="page-title">${icon('gear')} 设置</div></div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="m-title">平台绑定</div>
+      <p class="m-text">支持 GitHub / GitLab / Gitee / GitCode 多账号绑定。点顶栏的平台标签可快速切换；新增账号点下面按钮，回到登录页选择平台并粘贴 Token。</p>
+      ${state.accounts.length
+        ? '<div class="row-list" style="margin-bottom:14px">' + accountsRows + '</div>'
+        : '<div class="empty">' + icon('repo', 36) + '<div class="big">还没有绑定账号</div></div>'}
+      <div class="page-actions">
+        <button class="btn primary" id="st-add">${icon('plus')} 添加新平台账号</button>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="m-title">网络代理</div>
+      <p class="m-text">GitHub 直连超时/被墙时，可走本机代理客户端（肥猫云、Clash、V2Ray 等）的本地端口。改动即时生效，重启保持。</p>
+      <div class="chips" id="proxy-chips">
+        <button class="chip" data-pv="system">跟随系统</button>
+        <button class="chip" data-pv="direct">直连</button>
+        <button class="chip" data-pv="custom">自定义代理</button>
+      </div>
+      <div class="form-row" style="margin-top:12px">
+        <div class="m-field" style="flex:1;min-width:240px">
+          <label class="field-label">代理地址</label>
+          <input class="m-input" id="proxy-input" placeholder="例如 127.0.0.1:7890 或 socks5://127.0.0.1:1080" style="font-family:var(--mono)">
+        </div>
+        <button class="btn" id="proxy-save">保存</button>
+        <button class="btn" id="proxy-test">测试 GitHub 连接</button>
+      </div>
+      <div id="proxy-status" style="font-size:12.5px;color:var(--muted)"></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="m-title">关闭行为</div>
+      <p class="m-text">点窗口 × 时的默认动作。选了「不再询问」的策略后，随时可以在这里改回来。</p>
+      <div class="chips" id="close-policy-chips">
+        <button class="chip" data-cp="ask">每次询问</button>
+        <button class="chip" data-cp="minimize">最小化到后台</button>
+        <button class="chip" data-cp="exit">直接退出</button>
+      </div>
+      <div id="cp-current" style="margin-top:10px;color:var(--muted);font-size:12.5px"></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="m-title">外观</div>
+      <div class="page-actions">
+        <button class="btn" onclick="toggleTheme()">${icon(state.theme === 'dark' ? 'sun' : 'moon')} 切换到${state.theme === 'dark' ? '浅色' : '深色'}模式</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="m-title">关于</div>
+      <p class="m-text" style="margin-bottom:6px">
+        Git 控制台 · 本地多平台 Git 管理台（GitHub / GitLab / Gitee / GitCode）<br>
+        界面直接调用各平台官方 API，无任何中间服务器<br>
+        当前登录：<b>@${esc(state.user ? (state.user.login || '') : '')}</b> · ${esc(activeAccount() ? PLATFORMS[activeAccount().platform].label : '')}
+      </p>
+      <div id="bi-exe" style="font-size:11.5px;color:var(--subtle);font-family:var(--mono);word-break:break-all"></div>
+    </div>
+  `;
+  $$('#view-settings [data-act]').forEach(b => b.addEventListener('click', () => {
+    // 切账号统一走 enterShell：内部 resetSession 全量清理（含 starredSet/selected/reqGen/apiCache），
+    // 与顶栏切号路径等价——此前手抄清单漏了 selected（批量删除误删风险）与 gists/starredSet（跨账号泄漏）
+    state.activeIdx = Number(b.dataset.act);
+    saveAccounts();
+    enterShell();
+    toast('已切换账号');
+  }));
+  $$('#view-settings [data-del]').forEach(b => b.addEventListener('click', () => {
+    const i = Number(b.dataset.del);
+    const a = state.accounts[i];
+    confirmModal({
+      title: '解绑账号',
+      body: '解除 ' + esc(PLATFORMS[a.platform].label) + ' 账号 <b>' + esc((a.label || '').split('·').pop().trim()) + '</b> 的绑定？Token 将从本机删除。',
+      required: 'UNBIND',
+      okText: '确认解绑',
+      onConfirm: () => {
+        const wasActive = i === state.activeIdx;
+        removeAccount(i);
+        // 解绑最后一个账号 → 直接回登录页：否则 renderRepos 在无账号时永远渲染骨架屏（reposLoaded 恒 false），点「我的仓库」永久转圈
+        if (!state.accounts.length) { logout('已解绑全部账号'); return; }
+        // 解绑的是当前活跃账号 → activeIdx 已切到继任者，必须走 enterShell 全量重置会话，
+        // 否则 repos/repo/notifications 等仍是上一个账号数据，切视图会出现跨账号串号
+        if (wasActive) { enterShell(); toast('已解绑并切换账号'); return; }
+        state.user = null;
+        renderSettings();
+        renderTopbar();
+        toast('已解绑');
+      },
+    });
+  }));
+  $('#st-add').addEventListener('click', () => logout('选择平台并粘贴 Token 以添加新账号'));
+  const cpNames = { ask: '每次询问', minimize: '点 × 直接最小化到后台', exit: '点 × 直接退出' };
+  const applyCp = (p) => {
+    $$('#close-policy-chips .chip').forEach(c => c.classList.toggle('active', c.dataset.cp === p));
+    $('#cp-current').textContent = '当前策略：' + (cpNames[p] || p);
+  };
+  fetch(bridgeURL('getpolicy')).then(r => r.json()).then(d => applyCp(d.policy)).catch(() => {});
+  $$('#close-policy-chips .chip').forEach(c => c.addEventListener('click', () => {
+    fetch(bridgeURL('setpolicy', '&value=' + c.dataset.cp))
+      .then(() => { applyCp(c.dataset.cp); toast('关闭行为已更新'); })
+      .catch(() => {});
+  }));
+  // 网络代理（仅桌面版有效；Edge app 模式自动跟随系统代理）
+  const cpProxyNames = { system: '跟随系统', direct: '直连' };
+  const applyProxyUI = (v) => {
+    v = v || 'system';
+    const custom = v !== 'system' && v !== 'direct';
+    $$('#proxy-chips .chip').forEach(c => c.classList.toggle('active', c.dataset.pv === (custom ? 'custom' : v)));
+    $('#proxy-input').value = custom ? v : '';
+    $('#proxy-status').textContent = '当前代理：' + (custom ? v : (cpProxyNames[v] || v));
+  };
+  fetch(bridgeURL('getproxy')).then(r => r.json()).then(d => applyProxyUI(d.proxy)).catch(() => {});
+  $$('#proxy-chips .chip').forEach(c => c.addEventListener('click', () => {
+    const v = c.dataset.pv;
+    if (v === 'custom') { applyProxyUI($('#proxy-input').value.trim() || 'custom'); $('#proxy-input').focus(); return; }
+    fetch(bridgeURL('setproxy', '&value=' + encodeURIComponent(v)))
+      .then(r => r.json())
+      .then(d => {
+        // 按主进程真实结果给反馈：应用失败时不再无条件说「已更新」
+        if (!d || !d.ok) { toast('代理更新失败：' + ((d && d.error) || '未知错误'), 'err'); return; }
+        applyProxyUI(v); toast('代理已更新');
+      })
+      .catch(() => toast('代理更新失败：无法连接本地服务', 'err'));
+  }));
+  $('#proxy-save').addEventListener('click', () => {
+    const v = $('#proxy-input').value.trim();
+    if (!v) { toast('请填写代理地址（如 127.0.0.1:7890）', 'err'); return; }
+    fetch(bridgeURL('setproxy', '&value=' + encodeURIComponent(v)))
+      .then(r => r.json())
+      .then(d => {
+        // 仅在主进程确认 setProxy 成功后，才回显「已生效」
+        if (!d || !d.ok) { toast('代理保存失败：' + ((d && d.error) || '未知错误'), 'err'); return; }
+        applyProxyUI(v); toast('代理已保存并生效');
+      })
+      .catch(() => toast('代理保存失败：无法连接本地服务', 'err'));
+  });
+  fetch(bridgeURL('buildinfo')).then(r => r.json()).then(d => {
+    const el = $('#bi-exe');
+    if (el) el.textContent = '运行程序：' + d.exe + '（构建于 ' + (d.mtime || '?').replace('T', ' ').slice(0, 16) + '）';
+  }).catch(() => {});
+  $('#proxy-test').addEventListener('click', () => {
+    const st = $('#proxy-status');
+    st.textContent = '正在测试 GitHub 连接（最多 8 秒）...';
+    fetch(bridgeURL('ping')).then(r => r.json()).then(d => {
+      st.textContent = d.ok
+        ? '✓ GitHub 连接正常（' + d.ms + 'ms）'
+        : '✗ 连接失败：' + (d.error || ('HTTP ' + d.status)) + ' —— 如果代理客户端已开启，请确认端口后重新保存';
+    }).catch(() => { st.textContent = '✗ 测试请求失败'; });
+  });
+}
+</script>
