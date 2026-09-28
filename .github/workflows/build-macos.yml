@@ -1,0 +1,50 @@
+name: build-macos
+
+# 产出未签名（ad-hoc 签名）的 macOS .app。说明：
+# - 未使用 Apple Developer ID 签名/公证，首次打开需右键 →「打开」绕过 Gatekeeper。
+# - Apple Silicon（arm64）必须至少 ad-hoc 签名才能启动，故构建后统一 ad-hoc 签名。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install @electron/packager
+        working-directory: electron-app
+        run: npm install
+
+      - name: Build .app
+        working-directory: electron-app
+        run: node build-desktop.mjs --platform=darwin --arch=${{ matrix.arch }}
+
+      - name: Ad-hoc sign
+        working-directory: electron-app
+        run: codesign --force --deep --sign - "release/Git 控制台-darwin-${{ matrix.arch }}/Git 控制台.app"
+
+      - name: Package zip
+        working-directory: electron-app
+        run: |
+          cd release
+          ditto -c -k --keepParent "Git 控制台-darwin-${{ matrix.arch }}/Git 控制台.app" "git-console-macos-${{ matrix.arch }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-console-macos-${{ matrix.arch }}
+          path: electron-app/release/git-console-macos-${{ matrix.arch }}.zip

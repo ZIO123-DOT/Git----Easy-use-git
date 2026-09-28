@@ -3,5 +3,14 @@
   "productName": "Git 控制台",
   "version": "1.0.3",
   "private": true,
-  "main": "desktop.cjs"
+  "main": "desktop.cjs",
+  "scripts": {
+    "build": "node build-desktop.mjs",
+    "build:mac": "node build-desktop.mjs --platform=darwin --arch=arm64",
+    "build:mac:x64": "node build-desktop.mjs --platform=darwin --arch=x64",
+    "build:win": "node build-desktop.mjs --platform=win32 --arch=x64"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0"
+  }
 }
