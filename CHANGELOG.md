@@ -2,6 +2,16 @@
 
 本项目的重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.2] - 2026-09-28
+
+### Security
+
+- **移除 CSP `script-src 'unsafe-inline'`**：`console.html` 的 4 个内联 `<script>` 外置为独立的 `console.js`，26 个内联 `onclick` 改为 `data-act` 属性 + 单一事件委托分发器；`desktop.cjs` 新增 `/console.js` 静态路由并收紧 CSP 为 `script-src 'self'`。此前 XSS 纵深防御完全依赖 `esc()` 无遗漏，现在内联脚本与内联事件处理器在浏览器层被直接阻断。
+
+### Fixed
+
+- **`confirmModal` 潜在 XSS sink**：`body` 字段改为默认 `esc()` 转义，需保留 `<b>` 等标记的调用点改走新增的 `bodyHtml` 逃生舱（8 处调用点已同步），堵住未来调用方遗漏转义时直接注入 DOM 的隐患。
+
 ## [1.0.1] - 2026-09-28
 
 ### Fixed
