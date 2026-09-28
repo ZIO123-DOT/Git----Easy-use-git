@@ -25,6 +25,16 @@ let pendingDownload = null;
 let staleDownloadUntil = 0;
 // 桥接令牌：每次启动随机生成，经 URL fragment 注入页面，防本机其他进程/网页调用 /bridge
 const bridgeToken = crypto.randomBytes(16).toString("hex");
+// 下载域名白名单 + 校验。跨域 <a download> 走主进程 downloadURL，但 downloadURL 会跟随
+// 3xx 重定向——初始 URL 白名单不足以约束终链。此校验供「发起前」与「will-download 拿到
+// 重定向链后」两处复用，任一环节越界即拒绝。
+const DOWNLOAD_ALLOW = ["github.com", "githubusercontent.com", "gitlab.com", "gitee.com", "gitcode.com"];
+const isAllowedDownloadUrl = (raw) => {
+  let target = null;
+  try { target = new URL(raw); } catch { return false; }
+  if (target.protocol !== "https:") return false;
+  return DOWNLOAD_ALLOW.some((d) => target.hostname === d || target.hostname.endsWith("." + d));
+};
 
 // portableRoot 在 setPath 前还没定义，这里直接用 __dirname 的父级或应用目录
 // 日志改为内存缓冲 + 500ms/64KB 批量刷盘（原为每次同步写盘）
@@ -312,17 +322,14 @@ if (!app.requestSingleInstanceLock()) {
       },
       download: async ({ u, res }) => {
         // 文件页「下载」桥接：跨域 <a download> 会被浏览器忽略，故改由主进程 downloadURL 触发真实下载。
-        // host 白名单：只允许四个平台的下载域（含必要子域），杜绝被当成任意 URL 下载器（此处不放松）。
+        // host 白名单：只允许平台的下载域（含必要子域），杜绝被当成任意 URL 下载器（此处不放松）。
         const raw = u.searchParams.get("url") || "";
-        let target = null;
-        try { target = new URL(raw); } catch { target = null; }
-        const DOWNLOAD_ALLOW = ["github.com", "githubusercontent.com", "gitlab.com", "gitee.com", "gitcode.com"];
-        const hostAllowed = !!target && DOWNLOAD_ALLOW.some((d) => target.hostname === d || target.hostname.endsWith("." + d));
-        if (!target || target.protocol !== "https:" || !hostAllowed) {
+        if (!isAllowedDownloadUrl(raw)) {
           log("download: rejected url " + raw);
           jsonReply(res, 400, { ok: false, error: "url not allowed" });
           return;
         }
+        const target = new URL(raw);
         if (!window || window.isDestroyed()) {
           jsonReply(res, 500, { ok: false, error: "no window" });
           return;
@@ -588,6 +595,19 @@ if (!app.requestSingleInstanceLock()) {
     // 若 download 桥已登记 pendingDownload（用户刚在「另存为」里选定路径），则用该路径 setSavePath，
     // 并在 done 时把真实结果（completed/cancelled/interrupted）resolve 回桥接请求——不再无条件报成功。
     session.defaultSession.on("will-download", (_event, item) => {
+      // FIX(n-6)：重定向终链复检。downloadURL 会跟随 3xx 重定向，发起前的初始 URL 白名单
+      // 拦不住「白名单域重定向到内网/非 https」的终链。这里取完整重定向链逐段复检，任一越界即取消。
+      let chain = [];
+      try { chain = item.getURLChain() || []; } catch {}
+      const chainUrls = chain.length ? chain : [item.getURL()];
+      if (chainUrls.some((url) => !isAllowedDownloadUrl(url))) {
+        log("download: cancelled (redirect escaped whitelist): " + (chain.join(" -> ") || item.getURL()));
+        const pd = pendingDownload;
+        pendingDownload = null;
+        if (pd && typeof pd.resolve === "function") pd.resolve({ state: "cancelled" });
+        item.cancel();
+        return;
+      }
       const pd = pendingDownload;
       pendingDownload = null; // 单次消费
       let savePath;
