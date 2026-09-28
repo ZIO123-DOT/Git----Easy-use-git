@@ -41,14 +41,12 @@ nsis:
 portable:
   artifactName: multi-git-desktop-${version}-windows-portable.${ext}
 
-# macOS：dmg（拖入 Applications）+ zip
+# macOS：仅 dmg（拖入 Applications 的标准安装包，不出「解压即用」的 zip）
 mac:
   icon: build-resources/icon.png
   category: public.app-category.developer-tools
   target:
     - target: dmg
-      arch: [arm64, x64]
-    - target: zip
       arch: [arm64, x64]
 
 dmg:

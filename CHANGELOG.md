@@ -2,6 +2,16 @@
 
 本项目的重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.9] - 2026-09-29
+
+### Changed
+
+- **macOS 只出 dmg**：去掉「解压即用」的 zip 目标，mac 安装统一走 dmg（拖入「应用程序」），符合「安装包而非解压包」的定位。
+
+### Fixed
+
+- **发布权限**：`release` job 增加 `contents: write`，修复 GitHub Release 发布失败（"Resource not accessible by integration"）。
+
 ## [1.0.7] - 2026-09-29
 
 ### Fixed
