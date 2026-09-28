@@ -2,6 +2,12 @@
 
 本项目的重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.6] - 2026-09-29
+
+### Fixed
+
+- **补全 Linux `.deb` 所需元数据**：`package.json` 增加 `homepage` / `repository` / `license`，彻底修复 electron-builder 报 `Please specify project homepage` 导致的 deb 构建失败（`author.email` 已在 1.0.5 补齐）。
+
 ## [1.0.5] - 2026-09-29
 
 ### Fixed
