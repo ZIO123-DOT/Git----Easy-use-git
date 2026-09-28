@@ -14,6 +14,7 @@
 
 - **令牌常量时间比较**：桥接令牌校验由 `===` 改为 `crypto.timingSafeEqual`，消除本地服务上的理论定时侧信道。
 - **导航纵深**：补 `will-redirect` 守卫，与 `will-navigate` 同口径拦截跨源重定向，堵住「同源重定向带出窗口」的纵深缺口。
+- **下载重定向终链复检**：`will-download` 里取 `item.getURLChain()` 逐段复检 host 白名单 + https，堵住「白名单域 3xx 重定向到内网/非 https 终链」的盲 SSRF 面。
 
 ### Added
 
