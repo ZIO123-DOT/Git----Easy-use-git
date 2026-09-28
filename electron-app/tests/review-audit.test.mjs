@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 // GC_HTML / GC_CJS / GC_DOC：可选覆盖点，用于把断言对着「修复前」的备份产物跑一遍，
 // 验证新增的 FIX-xx 断言确实会红（证明它们能真正捕获回归）。
-const html = fs.readFileSync(process.env.GC_HTML || path.resolve(here, "../console.html"), "utf8");
+const html = fs.readFileSync(process.env.GC_HTML || path.resolve(here, "../console.js"), "utf8");
 const cjsPath = process.env.GC_CJS || path.resolve(here, "../desktop.cjs");
 const docPath = process.env.GC_DOC || path.resolve(here, "../../使用说明.txt");
 
@@ -408,7 +408,10 @@ const srcSetDel = html.slice(iDelHandler, iDelEnd);
   check("FIX-SET1 settings 关于口径含四平台", /GitHub \/ GitLab \/ Gitee \/ GitCode/.test(html), "");
   if (!process.env.GC_HTML) {
     const rootHtml = fs.readFileSync(path.resolve(here, "../../github-console.html"), "utf8");
-    check("FIX-MERGE2 根目录与 electron-app 两份产物逐字节一致", rootHtml === html, "");
+    const appHtml = fs.readFileSync(path.resolve(here, "../console.html"), "utf8");
+    check("FIX-MERGE2 根目录与 electron-app 两份产物逐字节一致", rootHtml === appHtml, "");
+    const rootJs = fs.readFileSync(path.resolve(here, "../../console.js"), "utf8");
+    check("FIX-MERGE3 根目录与 electron-app 两份 JS 逐字节一致", rootJs === html, "");
   }
 }
 

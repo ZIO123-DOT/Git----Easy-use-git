@@ -20,7 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const html = fs.readFileSync(process.env.GC_HTML || path.resolve(here, "../console.html"), "utf8");
+const html = fs.readFileSync(process.env.GC_HTML || path.resolve(here, "../console.js"), "utf8");
 
 function extractFn(marker) {
   const start = html.indexOf(marker);

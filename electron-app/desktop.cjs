@@ -161,6 +161,8 @@ if (!app.requestSingleInstanceLock()) {
     await loadProxy();
     // 本地静态服务：页面 + 桥接命令（后台运行 / 退出 / 策略）
     let htmlBytes = fs.readFileSync(PAGE);
+    const JS_PAGE = path.join(__dirname, "console.js");
+    let jsBytes = fs.readFileSync(JS_PAGE);
     let port = 58613;
     const server = http.createServer();
     const secretsFile = () => path.join(app.getPath("userData"), "tokens.enc.json");
@@ -464,6 +466,11 @@ if (!app.requestSingleInstanceLock()) {
           }
           return;
         }
+        if (req.url.startsWith("/console.js")) {
+          res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(jsBytes);
+          return;
+        }
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
         res.end(htmlBytes);
       });
@@ -480,7 +487,7 @@ if (!app.requestSingleInstanceLock()) {
       callback({
         responseHeaders: Object.assign({}, details.responseHeaders, {
           "Content-Security-Policy": [
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
             "connect-src 'self' https://api.github.com https://gitlab.com https://api.gitcode.com https://gitee.com; " +
             "img-src 'self' data: https://avatars.githubusercontent.com https://*.githubusercontent.com https://gitlab.com https://gitee.com https://portrait.gitee.com https://gitcode.com https://cdn-img.gitcode.com https://cdn-static.gitcode.com https://secure.gravatar.com; font-src 'self' data:; base-uri 'none'; object-src 'none'",
           ],

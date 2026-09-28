@@ -13,7 +13,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const target = process.env.AUDIT_TARGET
   ? (path.isAbsolute(process.env.AUDIT_TARGET) ? process.env.AUDIT_TARGET : path.resolve(here, "..", process.env.AUDIT_TARGET))
   : path.resolve(here, "..");
-const html = fs.readFileSync(path.join(target, "console.html"), "utf8");
+const html = fs.readFileSync(path.join(target, "console.js"), "utf8");
 const cjs = fs.readFileSync(path.join(target, "desktop.cjs"), "utf8");
 const isBackupRun = !!process.env.AUDIT_TARGET;
 
