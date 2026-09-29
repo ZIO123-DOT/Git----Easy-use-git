@@ -46,7 +46,7 @@ npx electron .
 cd electron-app
 npm install                       # 安装 electron + electron-builder
 npm run build:win                 # Windows：NSIS 安装器 + 便携版
-npm run build:mac                 # macOS：dmg + zip（arm64 + x64）
+npm run build:mac                 # macOS：dmg（arm64 + x64）
 npm run build:linux               # Linux：AppImage + deb
 ```
 
